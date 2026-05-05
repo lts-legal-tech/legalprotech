@@ -1,0 +1,6 @@
+@mydb_putty_101_HostAddress = http://localhost:5116
+
+GET {{mydb_putty_101_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

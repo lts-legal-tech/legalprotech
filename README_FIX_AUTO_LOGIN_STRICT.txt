@@ -1,0 +1,1 @@
+Sửa lỗi Worker nhận nhầm ô prompt/textbox là Google email login. maybeAutoLoginGoogle giờ chỉ tìm input email/password thật, không dùng role=textbox fallback. Có thể tắt tự động login bằng FLOW_AUTO_LOGIN_ENABLED=false.

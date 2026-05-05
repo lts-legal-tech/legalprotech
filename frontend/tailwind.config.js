@@ -1,0 +1,2 @@
+/** @type {import('tailwindcss').Config} */
+module.exports={content:['./app/**/*.{js,jsx}','./components/**/*.{js,jsx}','./lib/**/*.{js,jsx}'],theme:{extend:{colors:{base:'#060817'},boxShadow:{soft:'0 24px 80px rgba(0,0,0,.35)'},backgroundImage:{'hero-radial':'radial-gradient(circle at top left, rgba(115,92,255,.22), transparent 28%), radial-gradient(circle at top right, rgba(56,189,248,.16), transparent 25%), radial-gradient(circle at bottom, rgba(255,255,255,.06), transparent 45%)'}}},plugins:[]};

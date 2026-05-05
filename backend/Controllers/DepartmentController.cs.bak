@@ -1,0 +1,38 @@
+﻿using Microsoft.AspNetCore.Mvc;
+using MySql.Data.MySqlClient;
+using System.Data;
+
+namespace mydb_putty_101.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class DepartmentController : ControllerBase
+    {
+        private readonly IConfiguration configuration;
+        public DepartmentController(IConfiguration configuration)
+        {
+            this.configuration = configuration;
+        }
+
+        [HttpGet]
+        public JsonResult Get()
+        {
+            string query = @"SELECT DepartmentId, DepartmentName FROM mydb.Department";
+            DataTable table = new DataTable();
+            string sqlDataSource = configuration.GetConnectionString("EmployeeAppCon");
+            MySqlDataReader myReader;
+            using (MySqlConnection myCon = new MySqlConnection(sqlDataSource))
+            {
+                myCon.Open();
+                using (MySqlCommand myCommand = new MySqlCommand(query, myCon))
+                {
+                    myReader = myCommand.ExecuteReader();
+                    table.Load(myReader);
+                    myReader.Close();
+                    myCon.Close();
+                }
+            }
+            return new JsonResult(table);
+        }
+    }
+}

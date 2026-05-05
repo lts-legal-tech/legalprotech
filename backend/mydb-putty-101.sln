@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.37203.1 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "mydb-putty-101", "mydb-putty-101.csproj", "{B31418F2-CE66-4CAB-A4B2-40FD6026BBB4}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B31418F2-CE66-4CAB-A4B2-40FD6026BBB4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B31418F2-CE66-4CAB-A4B2-40FD6026BBB4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B31418F2-CE66-4CAB-A4B2-40FD6026BBB4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B31418F2-CE66-4CAB-A4B2-40FD6026BBB4}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9C31B457-C186-4B63-8C38-4A9138F23DB7}
+	EndGlobalSection
+EndGlobal

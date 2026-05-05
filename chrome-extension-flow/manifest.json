@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "LegalProTech Flow Automation Bridge",
+  "version": "0.2.0",
+  "description": "Nhận job từ Local Agent và tự động hóa Google Flow.",
+  "permissions": ["tabs", "storage", "scripting", "activeTab", "alarms"],
+  "host_permissions": [
+    "https://flow.google/*",
+    "https://labs.google/*",
+    "http://127.0.0.1:48765/*",
+    "http://localhost:48765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://flow.google/*", "https://labs.google/*"],
+      "js": ["content-flow.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Flow Automation Bridge"
+  }
+}

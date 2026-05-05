@@ -1,0 +1,48 @@
+{
+  "registrations": [
+    {
+      "id": "reg_1776742319967_x9jhnb",
+      "createdAt": "2026-04-21T03:31:59.967Z",
+      "fullName": "dxfcghfgsdffa",
+      "email": "admin1@gmail.com",
+      "password": "123456",
+      "accountType": "professional",
+      "accountLabel": "Tài khoản chuyên nghiệp",
+      "status": "active",
+      "fields": {
+        "schoolName": "",
+        "majorName": "",
+        "lawFirmName": "",
+        "companyName": "",
+        "jobTitle": ""
+      },
+      "entitlements": {
+        "maxVideoCount": 10,
+        "canSelectFrame": true
+      },
+      "lawyerCardImage": ""
+    },
+    {
+      "id": "reg_1776675395446_6jvybi",
+      "createdAt": "2026-04-20T08:56:35.446Z",
+      "fullName": "Vũ Đình Tư",
+      "email": "vtu8531@gmail.com",
+      "password": "Vudinhtu12",
+      "accountType": "student",
+      "accountLabel": "Sinh viên",
+      "status": "active",
+      "fields": {
+        "schoolName": "FPT",
+        "majorName": "IT",
+        "lawFirmName": "",
+        "companyName": "",
+        "jobTitle": ""
+      },
+      "entitlements": {
+        "maxVideoCount": 5,
+        "canSelectFrame": false
+      },
+      "lawyerCardImage": ""
+    }
+  ]
+}
