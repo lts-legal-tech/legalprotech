@@ -7,7 +7,7 @@ import { createFlowJob, getFlowJobStatus, postFlowResultsAction, splitPromptLine
 
 const imageAspectOptions = ['16:9', '4:3', '1:1', '3:4', '9:16'];
 const legacyAspectOptions = ['1:1', '4:5', '16:9', '9:16'];
-const imageToVideoAspectOptions = ['9:16', '16:9'];
+const videoAspectOptions = ['9:16', '16:9'];
 const imageToVideoDurationOptions = ['4', '6', '8'];
 const frameOptions = ['Frames', 'Ingredients'];
 const PROFILE_KEY = 'legalprotech-current-profile';
@@ -209,7 +209,7 @@ export function ToolWorkspace({ tool }) {
     }
 
     setJobState('loading');
-    setStatusText(isFlowImage ? 'Đang gửi lệnh tạo ảnh sang Windows VPS AutoFlow Nano Banana Pro.' : isImageToVideo ? 'Đang gửi lệnh image-to-video sang Windows VPS AutoFlow Veo 3.1 Fast (lower priority).' : 'Đang gửi lệnh lên hệ thống. Windows VPS sẽ tự chạy Flow.');
+    setStatusText(isFlowImage ? 'Đang gửi lệnh tạo ảnh sang Windows VPS AutoFlow Image Worker.' : isImageToVideo ? 'Đang gửi lệnh image-to-video sang Windows VPS AutoFlow Veo 3.1 Fast (lower priority).' : 'Đang gửi lệnh text-to-video lên Windows VPS AutoFlow Video Worker.');
     setError('');
     setResults([]);
     setToken('');
@@ -218,8 +218,6 @@ export function ToolWorkspace({ tool }) {
     setJobId('');
 
     const promptPayload = promptLines.join('\n');
-    const expandedPromptLines = isFlowImage ? promptLines.flatMap((line) => Array.from({ length: imagePerPromptNumber }, () => line)) : promptLines;
-    const jobPromptPayload = isFlowImage ? expandedPromptLines.join('\n') : promptPayload;
     await copyText(promptPayload).then(() => setCopiedPrompt(true)).catch(() => setCopiedPrompt(false));
 
     try {
@@ -228,9 +226,10 @@ export function ToolWorkspace({ tool }) {
       formData.append('model', model);
       formData.append('aspect_ratio', aspectRatio);
       formData.append('output_type', isFlowImage ? 'image' : 'video');
-      formData.append('prompt', jobPromptPayload);
+      formData.append('prompt', promptPayload);
       formData.append('videos_per_prompt', isVideo ? String(videosPerPromptNumber) : '1');
       formData.append('count', String(expectedFlowTotal));
+      if (isFlowImage) formData.append('count_per_prompt', String(imagePerPromptNumber));
       formData.append('duration', String(Number(duration || 8)));
       formData.append('frame', frame);
       if (imageFile) formData.append('image', imageFile);
@@ -319,11 +318,11 @@ export function ToolWorkspace({ tool }) {
           <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600">{tool.description}</p>
           <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-800">
             {isFlowImage ? (
-              <>Luồng ảnh chạy qua <b>Windows VPS AutoFlow Worker</b>, tự dùng <b>Nano Banana Pro</b> trên Flow. Chọn tỷ lệ 16:9 / 4:3 / 1:1 / 3:4 / 9:16 và số ảnh x1–x4 ngay trên web.</>
+              <>Luồng ảnh chạy qua <b>Windows VPS AutoFlow Worker</b>, thao tác đúng giao diện Flow Web: tab <b>Image</b>, tỷ lệ <b>16:9 / 4:3 / 1:1 / 3:4 / 9:16</b>, số ảnh <b>x1–x4</b> và đúng model <b>Nano Banana 2 / Nano Banana Pro / Imagen 4</b>.</>
             ) : isImageToVideo ? (
-              <>Luồng image-to-video chạy qua <b>Windows VPS AutoFlow Worker</b>, dùng đúng model <b>Veo 3.1 Fast (lower priority - leaving 5/10)</b>. Có ảnh <b>điểm đầu</b>, ảnh <b>điểm cuối</b>, tỷ lệ 9:16 / 16:9, số video x1–x4 và thời lượng 4s / 6s / 8s ngay trên web.</>
+              <>Luồng image-to-video chạy qua <b>Windows VPS AutoFlow Worker</b>, thao tác đúng giao diện Flow Web: tab <b>Video</b> → <b>Frames</b>, model <b>Veo 3.1 - Fast [Lower Priority] (leaving 5/10)</b>, tỷ lệ <b>9:16 / 16:9</b>, số video <b>x1–x4</b>, thời lượng <b>4s / 6s / 8s</b>, và dùng <b>ảnh điểm đầu + ảnh điểm cuối</b>.</>
             ) : (
-              <>Luồng video đã chuyển sang <b>Windows VPS AutoFlow Worker</b>. User chỉ gửi lệnh và xem kết quả.</>
+              <>Luồng text-to-video chạy qua <b>Windows VPS AutoFlow Worker</b>, thao tác đúng giao diện Flow Web: tab <b>Video</b>, model <b>Veo 3.1 - Fast [Lower Priority] (leaving 5/10)</b>, tỷ lệ <b>9:16 / 16:9</b>, số video <b>x1–x4</b> và thời lượng <b>4s / 6s / 8s</b>.</>
             )}
           </div>
         </div>
@@ -374,7 +373,7 @@ export function ToolWorkspace({ tool }) {
             </div>
             <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} className="input-light min-h-40 resize-none" />
             <div className="mt-2 flex flex-wrap items-center gap-3 text-xs leading-6 text-slate-500">
-              <span>{isVideo ? 'Mỗi dòng là 1 prompt. Có thể chọn 1–4 video cho mỗi prompt.' : `Mỗi dòng là 1 prompt. Nano Banana Pro sẽ tạo ${imagePerPromptNumber} ảnh cho mỗi dòng, tối đa ${maxImagePromptCount} ảnh/lần.`}</span>
+              <span>{isVideo ? 'Mỗi dòng là 1 prompt. Có thể chọn 1–4 video cho mỗi prompt.' : `Mỗi dòng là 1 prompt. Flow sẽ chọn đúng x${imagePerPromptNumber} trên web cho mỗi dòng, tối đa ${maxImagePromptCount} ảnh/lần.`}</span>
               <button type="button" onClick={() => copyText(promptLines.join('\n')).then(() => setCopiedPrompt(true))} className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-700">
                 <Copy className="h-3 w-3" /> Copy prompt
               </button>
@@ -399,11 +398,11 @@ export function ToolWorkspace({ tool }) {
                 </select>
               </div>
             </div>
-          ) : isImageToVideo ? (
+          ) : isVideo ? (
             <div className="space-y-4 rounded-[24px] border border-slate-200 bg-slate-50 p-4">
               <div>
                 <div className="mb-2 text-sm font-medium text-slate-700">Tỷ lệ video</div>
-                <SegmentedOptions options={imageToVideoAspectOptions} value={aspectRatio} onChange={setAspectRatio} columns={2} />
+                <SegmentedOptions options={videoAspectOptions} value={aspectRatio} onChange={setAspectRatio} columns={2} />
               </div>
               <div>
                 <div className="mb-2 text-sm font-medium text-slate-700">Số video / prompt</div>
@@ -455,16 +454,12 @@ export function ToolWorkspace({ tool }) {
             ) : isVideo ? (
               <>
                 <div>
-                  <div className="mb-2 text-sm text-slate-700">Thời lượng</div>
-                  <select value={duration} onChange={(e) => setDuration(e.target.value)} className="input-light">
-                    {['8'].map((item) => <option key={item} value={item}>{item} giây</option>)}
-                  </select>
+                  <div className="mb-2 text-sm text-slate-700">Setting video đang chọn</div>
+                  <div className="input-light flex items-center">{aspectRatio} · x{videosPerPromptNumber} · {duration}s</div>
                 </div>
                 <div>
-                  <div className="mb-2 text-sm text-slate-700">Số video / prompt</div>
-                  <select value={videosPerPrompt} onChange={(e) => setVideosPerPrompt(e.target.value)} className="input-light">
-                    {['1', '2', '3', '4'].map((item) => <option key={item} value={item}>{item} video / prompt</option>)}
-                  </select>
+                  <div className="mb-2 text-sm text-slate-700">Tổng video dự kiến</div>
+                  <div className="input-light flex items-center">{promptCount || 0} prompt × {videosPerPromptNumber} video = {expectedFlowTotal}/{maxVideoCount} video</div>
                 </div>
               </>
             ) : isFlowImage ? (
@@ -484,7 +479,7 @@ export function ToolWorkspace({ tool }) {
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm text-slate-600">Trạng thái</div>
                 <div className="rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-700">
-                  {isFlowImage ? 'Flow Nano Banana Pro' : isImageToVideo ? 'Flow Image to Video · Veo 3.1 Fast' : 'Windows VPS AutoFlow'}
+                  {isFlowImage ? 'Flow Image · Nano Banana' : isImageToVideo ? 'Flow Image to Video · Veo 3.1 Fast' : isVideo ? 'Flow Video · Veo 3.1 Fast' : 'Windows VPS AutoFlow'}
                 </div>
               </div>
               <div className="mt-2 flex items-center gap-2 text-sm text-slate-800">
@@ -495,7 +490,7 @@ export function ToolWorkspace({ tool }) {
             </div>
           </div>
           {error && <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
-          <button className="btn-primary w-full">{jobState === 'loading' ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />} {isImageToVideo ? 'Tạo image to video' : isVideo ? 'Tạo video' : isFlowImage ? 'Tạo ảnh bằng Nano Banana Pro' : 'Tạo nội dung'}</button>
+          <button className="btn-primary w-full">{jobState === 'loading' ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />} {isImageToVideo ? 'Tạo image to video' : isVideo ? 'Tạo video' : isFlowImage ? 'Tạo ảnh bằng Nano Banana' : 'Tạo nội dung'}</button>
         </form>
       </div>
       <ResultsList results={results} token={token} expiresAt={expiresAt} zipUrl={zipUrl} actionLoading={actionLoading} jobState={jobState} statusText={statusText} onAction={handleBatchAction} />

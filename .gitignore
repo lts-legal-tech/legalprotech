@@ -20,3 +20,9 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+# Flow local runtime files
+frontend/.flow-debug/
+frontend/.flow-profile*/
+frontend/public/flow-inputs/
+frontend/public/flow-outputs/
+frontend/chrome-flow-profile*/

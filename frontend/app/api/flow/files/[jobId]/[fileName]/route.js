@@ -23,7 +23,13 @@ function isZipBuffer(buffer) {
   return Buffer.isBuffer(buffer) && buffer.length >= 4 && buffer.readUInt32LE(0) === 0x04034b50;
 }
 
-function extractFirstMediaFromZipBuffer(zipBuffer) {
+function safeMediaFileName(value, fallback = 'result') {
+  const clean = path.basename(String(value || fallback)).replace(/[^a-zA-Z0-9._-]/g, '_');
+  return clean || fallback;
+}
+
+function readZipEntriesFromLocalHeaders(zipBuffer) {
+  const entries = [];
   let offset = 0;
   while (offset + 30 <= zipBuffer.length) {
     const signature = zipBuffer.readUInt32LE(offset);
@@ -44,22 +50,96 @@ function extractFirstMediaFromZipBuffer(zipBuffer) {
     const dataStart = nameEnd + extraLength;
     const dataEnd = dataStart + compressedSize;
 
-    if (nameEnd > zipBuffer.length || dataStart > zipBuffer.length || dataEnd > zipBuffer.length) break;
+    if (nameEnd > zipBuffer.length || dataStart > zipBuffer.length) break;
 
     const rawName = zipBuffer.slice(nameStart, nameEnd).toString('utf8');
-    const fileName = path.basename(rawName || 'result');
+    const fileName = safeMediaFileName(rawName || 'result');
     const ext = path.extname(fileName).toLowerCase();
-    if (!rawName.endsWith('/') && MEDIA_TYPES[ext]) {
+    const canReadPayload = compressedSize > 0 && dataEnd <= zipBuffer.length;
+
+    if (!rawName.endsWith('/') && MEDIA_TYPES[ext] && canReadPayload) {
       let data = zipBuffer.slice(dataStart, dataEnd);
       if (compressionMethod === 8) data = zlib.inflateRawSync(data);
       if (compressionMethod !== 0 && compressionMethod !== 8) throw new Error(`ZIP compression chưa hỗ trợ: ${compressionMethod}`);
-      return { fileName, ext, data };
+      if (data.length) entries.push({ fileName, ext, data });
     }
 
-    if ((generalPurposeFlag & 0x08) && compressedSize === 0) break;
+    if ((generalPurposeFlag & 0x08) || compressedSize === 0) break;
     offset = dataEnd;
   }
-  return null;
+  return entries;
+}
+
+function readZipEntriesFromCentralDirectory(zipBuffer) {
+  const entries = [];
+  const eocdSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const minSearch = Math.max(0, zipBuffer.length - 22 - 0xffff);
+  let eocdOffset = -1;
+  for (let i = zipBuffer.length - 22; i >= minSearch; i -= 1) {
+    if (zipBuffer[i] === eocdSignature[0] && zipBuffer.slice(i, i + 4).equals(eocdSignature)) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset < 0 || eocdOffset + 22 > zipBuffer.length) return entries;
+
+  const entryCount = zipBuffer.readUInt16LE(eocdOffset + 10);
+  const centralOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
+  let offset = centralOffset;
+
+  for (let i = 0; i < entryCount && offset + 46 <= zipBuffer.length; i += 1) {
+    if (zipBuffer.readUInt32LE(offset) !== 0x02014b50) break;
+
+    const compressionMethod = zipBuffer.readUInt16LE(offset + 10);
+    const compressedSize = zipBuffer.readUInt32LE(offset + 20);
+    const fileNameLength = zipBuffer.readUInt16LE(offset + 28);
+    const extraLength = zipBuffer.readUInt16LE(offset + 30);
+    const commentLength = zipBuffer.readUInt16LE(offset + 32);
+    const localHeaderOffset = zipBuffer.readUInt32LE(offset + 42);
+    const nameStart = offset + 46;
+    const nameEnd = nameStart + fileNameLength;
+
+    if (nameEnd > zipBuffer.length || localHeaderOffset + 30 > zipBuffer.length) break;
+
+    const rawName = zipBuffer.slice(nameStart, nameEnd).toString('utf8');
+    const fileName = safeMediaFileName(rawName || 'result');
+    const ext = path.extname(fileName).toLowerCase();
+
+    if (!rawName.endsWith('/') && MEDIA_TYPES[ext]) {
+      const localNameLength = zipBuffer.readUInt16LE(localHeaderOffset + 26);
+      const localExtraLength = zipBuffer.readUInt16LE(localHeaderOffset + 28);
+      const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
+      const dataEnd = dataStart + compressedSize;
+      if (dataEnd <= zipBuffer.length) {
+        let data = zipBuffer.slice(dataStart, dataEnd);
+        if (compressionMethod === 8) data = zlib.inflateRawSync(data);
+        if (compressionMethod !== 0 && compressionMethod !== 8) throw new Error(`ZIP compression chưa hỗ trợ: ${compressionMethod}`);
+        if (data.length) entries.push({ fileName, ext, data });
+      }
+    }
+
+    offset = nameEnd + extraLength + commentLength;
+  }
+  return entries;
+}
+
+function extractFirstMediaFromZipBuffer(zipBuffer) {
+  const entries = [
+    ...readZipEntriesFromLocalHeaders(zipBuffer),
+    ...readZipEntriesFromCentralDirectory(zipBuffer),
+  ];
+  const uniqueEntries = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const key = `${entry.fileName}:${entry.data.length}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueEntries.push(entry);
+  }
+
+  const videos = uniqueEntries.filter((x) => ['.mp4', '.webm', '.mov'].includes(x.ext));
+  const images = uniqueEntries.filter((x) => ['.png', '.jpg', '.jpeg', '.webp'].includes(x.ext));
+  return videos[0] || images[0] || uniqueEntries[0] || null;
 }
 
 function resolveActualMediaFile(filePath) {

@@ -11,7 +11,9 @@ export async function POST(request) {
   if (!isAllowed(request)) return NextResponse.json({ success: false, error: 'Sai WORKER_API_KEY.' }, { status: 401 });
   const body = await request.json().catch(() => ({}));
   const workerId = String(body?.workerId || 'windows-vps-worker');
-  const job = await claimNextFlowJob(workerId);
+  const supportedTools = Array.isArray(body?.supportedTools) ? body.supportedTools : [];
+  const supportedWorkerTypes = Array.isArray(body?.supportedWorkerTypes) ? body.supportedWorkerTypes : [];
+  const job = await claimNextFlowJob(workerId, { supportedTools, supportedWorkerTypes });
   if (!job) return NextResponse.json({ success: true, job: null, message: 'Không có job mới.' });
   return NextResponse.json({ success: true, job });
 }

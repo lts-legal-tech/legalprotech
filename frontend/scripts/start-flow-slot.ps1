@@ -44,12 +44,14 @@ if (-not $env:FLOW_API_BASE_URL) { $env:FLOW_API_BASE_URL = "http://127.0.0.1:30
 if ($KeepChromeOpen) {
   $env:FLOW_KEEP_BROWSER_OPEN = "true"
 } elseif (-not $env:FLOW_KEEP_BROWSER_OPEN) {
-  $env:FLOW_KEEP_BROWSER_OPEN = "false"
+  # Giữ profile Chrome mở trong từng slot để không phải setup lại cho mỗi job.
+  $env:FLOW_KEEP_BROWSER_OPEN = "true"
 }
 
 # Reduce aggressive polling in multi-slot mode.
-if (-not $env:FLOW_WORKER_POLL_INTERVAL_MS) { $env:FLOW_WORKER_POLL_INTERVAL_MS = "15000" }
-if (-not $env:FLOW_RESULT_READY_POLL_MS) { $env:FLOW_RESULT_READY_POLL_MS = "10000" }
+if (-not $env:FLOW_WORKER_POLL_INTERVAL_MS) { $env:FLOW_WORKER_POLL_INTERVAL_MS = "3000" }
+if (-not $env:FLOW_RESULT_READY_POLL_MS) { $env:FLOW_RESULT_READY_POLL_MS = "2500" }
+if (-not $env:FLOW_DOWNLOAD_TIMEOUT_MS) { $env:FLOW_DOWNLOAD_TIMEOUT_MS = "120000" }
 if (-not $env:FLOW_RECLAIM_STALLED_JOBS) { $env:FLOW_RECLAIM_STALLED_JOBS = "false" }
 if (-not $env:FLOW_MAX_CLAIM_ATTEMPTS) { $env:FLOW_MAX_CLAIM_ATTEMPTS = "1" }
 

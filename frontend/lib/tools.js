@@ -7,16 +7,18 @@ export const TOOL_LIST = [
     outputType: 'image',
     useFlow: true,
     description:
-      'Tạo ảnh quảng cáo, visual social, poster hoặc concept từ prompt. Luồng này chạy qua Windows VPS AutoFlow, tự dùng Nano Banana Pro trên Flow và trả ảnh về website.',
+      'Tạo ảnh quảng cáo, visual social, poster hoặc concept từ prompt. Luồng này chạy qua Windows VPS AutoFlow, thao tác giống Flow Web: tab Image, chọn tỷ lệ, x1–x4 và đúng model Nano Banana.',
     defaults: {
       prompt:
         'Premium skincare bottle on reflective surface, soft spotlight, minimal luxury set, ad-ready composition.',
-      model: 'nano-banana-pro',
+      model: 'nano-banana-2',
       aspectRatio: '16:9',
       count: '1',
     },
     models: [
+      { id: 'nano-banana-2', label: 'Nano Banana 2' },
       { id: 'nano-banana-pro', label: 'Nano Banana Pro' },
+      { id: 'imagen-4', label: 'Imagen 4' },
     ],
     expectedCount: 4,
     iconName: 'image',
@@ -27,8 +29,9 @@ export const TOOL_LIST = [
     shortLabel: 'Tạo video từ prompt',
     inputMode: 'text',
     outputType: 'video',
+    useFlow: true,
     description:
-      'Luồng video chạy qua Windows VPS Worker. User tạo job trên web, Worker mở Flow, chọn model, nhập prompt và trả kết quả về website.',
+      'Luồng video chạy qua Windows VPS Worker. User tạo job trên web, Worker mở Flow, chọn đúng setting Video như giao diện web và trả kết quả về website.',
     defaults: {
       prompt:
         'Luxury skincare commercial, cinematic lighting, smooth camera move, clean premium set, elegant hand interaction.',
@@ -38,9 +41,9 @@ export const TOOL_LIST = [
       videosPerPrompt: '1',
     },
     models: [
-      { id: 'veo-3.1-fast-lower-priority', label: 'Veo 3.1 Fast (lower priority - leaving 5/10)' },
-      { id: 'veo-3.1-fast-generate-preview', label: 'Veo 3.1 Fast' },
-      { id: 'veo-3.1-generate-preview', label: 'Veo 3.1 Standard' },
+      { id: 'veo-3.1-fast-lower-priority', label: 'Veo 3.1 - Fast [Lower Priority] (leaving 5/10)' },
+      { id: 'veo-3.1-fast-generate-preview', label: 'Veo 3.1 - Fast' },
+      { id: 'veo-3.1-generate-preview', label: 'Veo 3.1 - Standard' },
     ],
     expectedCount: 10,
     iconName: 'video',
@@ -51,8 +54,9 @@ export const TOOL_LIST = [
     shortLabel: 'Biến ảnh thành video',
     inputMode: 'image+text',
     outputType: 'video',
+    useFlow: true,
     description:
-      'Luồng image-to-video chạy qua Windows VPS Worker. Website gửi ảnh điểm đầu/điểm cuối và prompt, Worker mở Flow, chọn đúng model Veo 3.1 Fast (lower priority - leaving 5/10), upload frame và trả video về website.',
+      'Luồng image-to-video chạy qua Windows VPS Worker. Website gửi ảnh điểm đầu/điểm cuối và prompt; Worker mở Flow ở tab Video → Frames, upload start/end frame, chọn đúng model và trả video về website.',
     defaults: {
       prompt:
         'Add subtle camera dolly-in, glossy reflections, premium movement, elegant motion design.',
@@ -62,9 +66,9 @@ export const TOOL_LIST = [
       videosPerPrompt: '1',
     },
     models: [
-      { id: 'veo-3.1-fast-lower-priority', label: 'Veo 3.1 Fast (lower priority - leaving 5/10)' },
-      { id: 'veo-3.1-fast-generate-preview', label: 'Veo 3.1 Fast' },
-      { id: 'veo-3.1-generate-preview', label: 'Veo 3.1 Standard' },
+      { id: 'veo-3.1-fast-lower-priority', label: 'Veo 3.1 - Fast [Lower Priority] (leaving 5/10)' },
+      { id: 'veo-3.1-fast-generate-preview', label: 'Veo 3.1 - Fast' },
+      { id: 'veo-3.1-generate-preview', label: 'Veo 3.1 - Standard' },
     ],
     expectedCount: 10,
     iconName: 'wand',

@@ -95,6 +95,16 @@ const ACTIVE_STATUSES = new Set([
   FLOW_STATUSES.PACKAGING,
 ]);
 
+const TOOL_WORKER_TYPES = {
+  'text-to-image': 'image',
+  'text-to-video': 'video',
+  'image-to-video': 'image-to-video',
+};
+
+export function getFlowWorkerType(tool = '') {
+  return TOOL_WORKER_TYPES[String(tool || '').trim()] || 'video';
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -285,11 +295,15 @@ export async function recoverFlowJobFromSnapshot(jobId, snapshot = {}) {
     status: FLOW_STATUSES.FETCHING_RESULTS,
     message: 'Job được khôi phục tự động khi Worker trả kết quả. Có thể Next dev server đã reload trong lúc Flow đang chạy.',
     tool: snapshot.tool || 'image-to-video',
+    outputType: snapshot.outputType || ((snapshot.tool === 'text-to-image' || snapshot.tool === 'my-product') ? 'image' : 'video'),
     model: snapshot.model || 'flow',
     aspectRatio: snapshot.aspectRatio || '16:9',
     duration: Number(snapshot.duration || 8),
     frame: snapshot.frame || 'Auto',
+    videosPerPrompt: Number(snapshot.videosPerPrompt || 1),
+    countPerPrompt: Number(snapshot.countPerPrompt || 1),
     requestedCount: Number(snapshot.requestedCount || prompts.length || 1),
+    maxResults: Number(snapshot.maxResults || snapshot.requestedCount || prompts.length || 1),
     prompt,
     prompts,
     inputAsset: snapshot.inputAsset || null,
@@ -298,6 +312,7 @@ export async function recoverFlowJobFromSnapshot(jobId, snapshot = {}) {
     zipUrl: snapshot.zipUrl || `/api/flow/jobs/${jobId}/download`,
     shareUrl: snapshot.shareUrl || `/shared/${token}`,
     expiresAt: snapshot.expiresAt || futureIso(),
+    workerType: snapshot.workerType || getFlowWorkerType(snapshot.tool || 'image-to-video'),
     workerId: snapshot.workerId || '',
     heartbeatAt: now,
     claimedAt: snapshot.claimedAt || '',
@@ -371,15 +386,17 @@ export async function createFlowJobFromFormData(formData) {
   const isVideoJob = outputType === 'video';
   const videosPerPromptRaw = Number(formData.get('videos_per_prompt') || formData.get('videosPerPrompt') || 1);
   const videosPerPrompt = isVideoJob ? Math.max(1, Math.min(videosPerPromptRaw || 1, 4)) : 1;
+  const countPerPromptRaw = Number(formData.get('count_per_prompt') || formData.get('countPerPrompt') || 1);
+  const countPerPrompt = isVideoJob ? 1 : Math.max(1, Math.min(countPerPromptRaw || 1, 4));
   const serverMaxResults = isVideoJob
     ? Number(process.env.FLOW_MAX_VIDEO_RESULTS_PER_JOB || process.env.FLOW_MAX_RESULTS_PER_JOB || 10)
     : Number(process.env.FLOW_IMAGE_MAX_PROMPTS || process.env.FLOW_MAX_IMAGE_PROMPTS_PER_JOB || 4);
-  const requestedTotal = isVideoJob ? prompts.length * videosPerPrompt : prompts.length;
+  const requestedTotal = isVideoJob ? prompts.length * videosPerPrompt : prompts.length * countPerPrompt;
 
   if (requestedTotal > serverMaxResults) {
     throw new Error(isVideoJob
       ? `Mỗi job chỉ được tối đa ${serverMaxResults} video. Hiện tại: ${prompts.length} prompt × ${videosPerPrompt} video = ${requestedTotal} video.`
-      : `Mỗi job chỉ được tối đa ${serverMaxResults} ảnh. Hiện tại: ${prompts.length} prompt.`);
+      : `Mỗi job chỉ được tối đa ${serverMaxResults} ảnh. Hiện tại: ${prompts.length} prompt × ${countPerPrompt} ảnh = ${requestedTotal} ảnh.`);
   }
 
   const image = formData.get('image');
@@ -403,7 +420,9 @@ export async function createFlowJobFromFormData(formData) {
     duration: Number(formData.get('duration') || 8),
     frame: String(formData.get('frame') || 'Auto'),
     videosPerPrompt,
+    countPerPrompt,
     requestedCount: count,
+    workerType: getFlowWorkerType(tool),
     maxResults: serverMaxResults,
     prompt,
     prompts,
@@ -455,11 +474,26 @@ function appendTimeline(job, status, message, extra = {}) {
   ].slice(-80);
 }
 
-export async function claimNextFlowJob(workerId = 'windows-vps-worker') {
+export async function claimNextFlowJob(workerId = 'windows-vps-worker', { supportedTools = [], supportedWorkerTypes = [] } = {}) {
   return withClaimLock(async () => {
     const jobs = await listFlowJobs();
     const nowMs = Date.now();
+    const allowedTools = Array.isArray(supportedTools) && supportedTools.length
+      ? new Set(supportedTools.map((item) => String(item)))
+      : null;
+    const allowedWorkerTypes = Array.isArray(supportedWorkerTypes) && supportedWorkerTypes.length
+      ? new Set(supportedWorkerTypes.map((item) => String(item)))
+      : null;
+
+    const matchesWorker = (job) => {
+      const workerType = job.workerType || getFlowWorkerType(job.tool);
+      if (allowedTools && !allowedTools.has(String(job.tool || ''))) return false;
+      if (allowedWorkerTypes && !allowedWorkerTypes.has(String(workerType || ''))) return false;
+      return true;
+    };
+
     const candidate = jobs.find((job) => {
+      if (!matchesWorker(job)) return false;
       if (job.status === FLOW_STATUSES.QUEUED) return true;
       if (!RECLAIM_STALLED_JOBS) return false;
       if (!ACTIVE_STATUSES.has(job.status)) return false;
@@ -472,9 +506,8 @@ export async function claimNextFlowJob(workerId = 'windows-vps-worker') {
 
     if (!candidate) return null;
 
-    // Đọc lại ngay trong lock để tránh 2 worker claim trùng cùng một job.
     const fresh = await readFlowJob(candidate.jobId);
-    if (!fresh) return null;
+    if (!fresh || !matchesWorker(fresh)) return null;
     if (fresh.status !== FLOW_STATUSES.QUEUED) {
       if (!RECLAIM_STALLED_JOBS || !ACTIVE_STATUSES.has(fresh.status)) return null;
     }
@@ -482,6 +515,7 @@ export async function claimNextFlowJob(workerId = 'windows-vps-worker') {
     const patched = await patchFlowJob(candidate.jobId, (current) => ({
       status: FLOW_STATUSES.CLAIMED,
       message: `Worker ${workerId} đã nhận job và chuẩn bị mở Flow.`,
+      workerType: current.workerType || getFlowWorkerType(current.tool),
       workerId,
       claimedAt: nowIso(),
       heartbeatAt: nowIso(),
@@ -674,7 +708,9 @@ export function normalizeJob(job) {
     aspectRatio: job.aspectRatio,
     duration: job.duration,
     frame: job.frame,
+    workerType: job.workerType || getFlowWorkerType(job.tool),
     videosPerPrompt: Number(job.videosPerPrompt || 1),
+    countPerPrompt: Number(job.countPerPrompt || 1),
     requestedCount: Number(job.requestedCount || (Array.isArray(job.prompts) ? job.prompts.length : 1)),
     maxResults: Number(job.maxResults || job.requestedCount || (Array.isArray(job.prompts) ? job.prompts.length : 1)),
     prompts: job.prompts || [],

@@ -51,10 +51,65 @@ const FLOW_KEEP_BROWSER_OPEN = String(env.FLOW_KEEP_BROWSER_OPEN || 'true').toLo
 const FLOW_STRICT_MODEL = String(env.FLOW_STRICT_MODEL || 'true').toLowerCase() !== 'false';
 const FLOW_IMAGE_DOWNLOAD_QUALITY = String(env.FLOW_IMAGE_DOWNLOAD_QUALITY || '2K').trim().toUpperCase();
 const FLOW_AFTER_CREATE_DELAY_MS = Number(env.FLOW_AFTER_CREATE_DELAY_MS || 5000);
+const FLOW_CHROME_WINDOW_WIDTH = Number(env.FLOW_CHROME_WINDOW_WIDTH || 1400);
+const FLOW_CHROME_WINDOW_HEIGHT = Number(env.FLOW_CHROME_WINDOW_HEIGHT || 1000);
+const FLOW_BROWSER_LAUNCH_RETRIES = Math.max(1, Number(env.FLOW_BROWSER_LAUNCH_RETRIES || 2));
 
 const FLOW_FAST_SELECTOR_MODE = String(env.FLOW_FAST_SELECTOR_MODE || 'true').toLowerCase() !== 'false';
 const FLOW_FORCE_COORDINATES = String(env.FLOW_FORCE_COORDINATES || 'false').toLowerCase() === 'true';
 const FLOW_COORDINATE_HELPER = String(env.FLOW_COORDINATE_HELPER || 'false').toLowerCase() === 'true';
+
+const CHROME_PROFILE_LOCK_FILES = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort', 'BrowserMetrics-spare.pma'];
+
+async function cleanupChromeProfileLocks(userDataDir) {
+  for (const fileName of CHROME_PROFILE_LOCK_FILES) {
+    await fs.rm(path.join(userDataDir, fileName), { force: true, recursive: true }).catch(() => {});
+  }
+}
+
+function chromeLaunchArgs() {
+  return [
+    `--window-size=${FLOW_CHROME_WINDOW_WIDTH},${FLOW_CHROME_WINDOW_HEIGHT}`,
+    '--disable-extensions',
+    '--disable-component-extensions-with-background-pages',
+    '--disable-background-networking',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-search-engine-choice-screen',
+    '--disable-sync',
+    ...String(env.FLOW_CHROME_EXTRA_ARGS || '').split(/\s+/).map((x) => x.trim()).filter(Boolean),
+  ];
+}
+
+async function launchFlowBrowserContext(userDataDir, ownerLabel = 'windows-flow-worker') {
+  await fs.mkdir(userDataDir, { recursive: true });
+  await cleanupChromeProfileLocks(userDataDir);
+  let currentDir = userDataDir;
+  let lastError = null;
+  for (let attempt = 1; attempt <= FLOW_BROWSER_LAUNCH_RETRIES; attempt += 1) {
+    try {
+      console.log(`[worker] launching Chrome`, { ownerLabel, userDataDir: currentDir, attempt });
+      return await chromium.launchPersistentContext(currentDir, {
+        headless: false,
+        executablePath: CHROME_EXECUTABLE_PATH,
+        acceptDownloads: true,
+        viewport: { width: FLOW_CHROME_WINDOW_WIDTH, height: FLOW_CHROME_WINDOW_HEIGHT },
+        screen: { width: FLOW_CHROME_WINDOW_WIDTH, height: FLOW_CHROME_WINDOW_HEIGHT },
+        args: chromeLaunchArgs(),
+      });
+    } catch (error) {
+      lastError = error;
+      console.warn(`[worker] Chrome launch failed attempt ${attempt}/${FLOW_BROWSER_LAUNCH_RETRIES}:`, error?.message || error);
+      await cleanupChromeProfileLocks(currentDir);
+      if (attempt === 1 && /Browser\.getWindowForTarget|Browser window not found|ProcessSingleton|profile|Singleton|DevToolsActivePort|process did exit/i.test(String(error?.message || error || ''))) {
+        currentDir = `${userDataDir}-recover-${Date.now()}`;
+        await fs.mkdir(currentDir, { recursive: true });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 900));
+    }
+  }
+  throw new Error(`Không mở được Chrome Flow. Lỗi cuối: ${lastError?.message || lastError}`);
+}
 
 function envPoint(prefix) {
   const x = Number(env[`${prefix}_X`] || 0);
@@ -99,6 +154,8 @@ const DEFAULT_SAMPLE_VIDEO = 'https://samplelib.com/lib/preview/mp4/sample-5s.mp
 const DEFAULT_SAMPLE_IMAGE = 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1200&q=80';
 const RUNNING_JOB_IDS = new Set();
 const FINISHED_JOB_IDS = new Set();
+let CACHED_BROWSER_CONTEXT = null;
+
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -161,7 +218,7 @@ function isZipBytes(buffer) {
   return Buffer.isBuffer(buffer) && buffer.length >= 4 && buffer.readUInt32LE(0) === 0x04034b50;
 }
 
-function extractFirstMediaFromZipBytes(zipBuffer, preferredOutputType = 'video') {
+function readZipEntriesFromLocalHeaders(zipBuffer) {
   const entries = [];
   let offset = 0;
   while (offset + 30 <= zipBuffer.length) {
@@ -183,27 +240,101 @@ function extractFirstMediaFromZipBytes(zipBuffer, preferredOutputType = 'video')
     const dataStart = nameEnd + extraLength;
     const dataEnd = dataStart + compressedSize;
 
-    if (nameEnd > zipBuffer.length || dataStart > zipBuffer.length || dataEnd > zipBuffer.length) break;
+    if (nameEnd > zipBuffer.length || dataStart > zipBuffer.length) break;
 
     const rawName = zipBuffer.slice(nameStart, nameEnd).toString('utf8');
     const safeName = path.basename(rawName || 'result').replace(/[^a-zA-Z0-9._-]/g, '_');
     const ext = path.extname(safeName).toLowerCase();
-    if (!rawName.endsWith('/') && RESULT_MEDIA_TYPES[ext]) {
+    const canReadPayload = compressedSize > 0 && dataEnd <= zipBuffer.length;
+
+    if (!rawName.endsWith('/') && RESULT_MEDIA_TYPES[ext] && canReadPayload) {
       let data = zipBuffer.slice(dataStart, dataEnd);
       if (compressionMethod === 8) data = zlib.inflateRawSync(data);
       if (compressionMethod !== 0 && compressionMethod !== 8) throw new Error(`ZIP media compression chưa hỗ trợ: ${compressionMethod}`);
       if (data.length) entries.push({ fileName: safeName, bytes: data, ext });
     }
 
-    if ((generalPurposeFlag & 0x08) && compressedSize === 0) break;
+    // ZIP có data descriptor thường để size = 0 ở local header.
+    // Khi gặp dạng này, chuyển sang đọc central directory thay vì kết luận lỗi.
+    if ((generalPurposeFlag & 0x08) || compressedSize === 0) break;
     offset = dataEnd;
   }
+  return entries;
+}
 
-  const videos = entries.filter((x) => ['.mp4', '.webm', '.mov'].includes(x.ext));
-  const images = entries.filter((x) => ['.png', '.jpg', '.jpeg', '.webp'].includes(x.ext));
+function readZipEntriesFromCentralDirectory(zipBuffer) {
+  const entries = [];
+  const eocdSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const minSearch = Math.max(0, zipBuffer.length - 22 - 0xffff);
+  let eocdOffset = -1;
+  for (let i = zipBuffer.length - 22; i >= minSearch; i -= 1) {
+    if (zipBuffer[i] === eocdSignature[0] && zipBuffer.slice(i, i + 4).equals(eocdSignature)) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset < 0 || eocdOffset + 22 > zipBuffer.length) return entries;
+
+  const entryCount = zipBuffer.readUInt16LE(eocdOffset + 10);
+  const centralOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
+  let offset = centralOffset;
+
+  for (let i = 0; i < entryCount && offset + 46 <= zipBuffer.length; i += 1) {
+    if (zipBuffer.readUInt32LE(offset) !== 0x02014b50) break;
+
+    const compressionMethod = zipBuffer.readUInt16LE(offset + 10);
+    const compressedSize = zipBuffer.readUInt32LE(offset + 20);
+    const fileNameLength = zipBuffer.readUInt16LE(offset + 28);
+    const extraLength = zipBuffer.readUInt16LE(offset + 30);
+    const commentLength = zipBuffer.readUInt16LE(offset + 32);
+    const localHeaderOffset = zipBuffer.readUInt32LE(offset + 42);
+    const nameStart = offset + 46;
+    const nameEnd = nameStart + fileNameLength;
+
+    if (nameEnd > zipBuffer.length || localHeaderOffset + 30 > zipBuffer.length) break;
+
+    const rawName = zipBuffer.slice(nameStart, nameEnd).toString('utf8');
+    const safeName = path.basename(rawName || 'result').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const ext = path.extname(safeName).toLowerCase();
+
+    if (!rawName.endsWith('/') && RESULT_MEDIA_TYPES[ext]) {
+      const localNameLength = zipBuffer.readUInt16LE(localHeaderOffset + 26);
+      const localExtraLength = zipBuffer.readUInt16LE(localHeaderOffset + 28);
+      const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
+      const dataEnd = dataStart + compressedSize;
+      if (dataEnd <= zipBuffer.length) {
+        let data = zipBuffer.slice(dataStart, dataEnd);
+        if (compressionMethod === 8) data = zlib.inflateRawSync(data);
+        if (compressionMethod !== 0 && compressionMethod !== 8) throw new Error(`ZIP media compression chưa hỗ trợ: ${compressionMethod}`);
+        if (data.length) entries.push({ fileName: safeName, bytes: data, ext });
+      }
+    }
+
+    offset = nameEnd + extraLength + commentLength;
+  }
+
+  return entries;
+}
+
+function extractFirstMediaFromZipBytes(zipBuffer, preferredOutputType = 'video') {
+  const entries = [
+    ...readZipEntriesFromLocalHeaders(zipBuffer),
+    ...readZipEntriesFromCentralDirectory(zipBuffer),
+  ];
+  const uniqueEntries = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const key = `${entry.fileName}:${entry.bytes.length}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueEntries.push(entry);
+  }
+
+  const videos = uniqueEntries.filter((x) => ['.mp4', '.webm', '.mov'].includes(x.ext));
+  const images = uniqueEntries.filter((x) => ['.png', '.jpg', '.jpeg', '.webp'].includes(x.ext));
   const picked = preferredOutputType === 'image'
-    ? (images[0] || videos[0] || entries[0])
-    : (videos[0] || images[0] || entries[0]);
+    ? (images[0] || videos[0] || uniqueEntries[0])
+    : (videos[0] || images[0] || uniqueEntries[0]);
 
   return picked || null;
 }
@@ -1223,18 +1354,11 @@ async function ensureFlowComposerReady(page, jobId, promptSelectors, newProjectS
 async function openFlowSettingsPanel(page, jobId, options = {}) {
   const force = Boolean(options.force);
 
-  // Chỉ coi panel đã mở khi thấy các text đặc trưng nằm trong popover setting.
-  // Không được coi "Nano Banana Pro" trên chip dưới prompt là panel đã mở.
+  // Chỉ coi panel đã mở khi chính vùng overlay/popover đang hiện.
+  // Tránh đọc text toàn body vì chip dưới prompt cũng có "Image/Video/Model".
   if (!force) {
-    const alreadyOpen = await page.evaluate(() => {
-      const text = String(document.body?.innerText || '').replace(/\s+/g, ' ');
-      const hasPanelFooter = /Generating will use\s+\d+\s+credits|Generating will use\s+0\s+credits/i.test(text);
-      const hasImageVideoTabs = /\bImage\b[\s\S]{0,80}\bVideo\b|\bVideo\b[\s\S]{0,80}\bImage\b/i.test(text);
-      const hasPanelControls = /\bFrames\b|\bIngredients\b|\b16:9\b|\b9:16\b|\b4:3\b|\b1:1\b|\b3:4\b/i.test(text);
-      return hasPanelFooter || (hasImageVideoTabs && hasPanelControls);
-    }).catch(() => false);
-
-    if (alreadyOpen) return true;
+    const panelState = await getFlowSettingsPanelState(page).catch(() => ({ open: false }));
+    if (panelState?.open) return true;
   }
 
   const chip = await page.evaluate(() => {
@@ -1307,13 +1431,8 @@ async function openFlowSettingsPanel(page, jobId, options = {}) {
   await page.mouse.click(chip.x, chip.y);
   await page.waitForTimeout(Number(env.FLOW_AFTER_OPEN_SETTINGS_PANEL_DELAY_MS || 900));
 
-  const opened = await page.evaluate(() => {
-    const text = String(document.body?.innerText || '').replace(/\s+/g, ' ');
-    const hasPanelFooter = /Generating will use\s+\d+\s+credits|Generating will use\s+0\s+credits/i.test(text);
-    const hasImageVideoTabs = /\bImage\b[\s\S]{0,80}\bVideo\b|\bVideo\b[\s\S]{0,80}\bImage\b/i.test(text);
-    const hasPanelControls = /\bFrames\b|\bIngredients\b|\b16:9\b|\b9:16\b|\b4:3\b|\b1:1\b|\b3:4\b/i.test(text);
-    return hasPanelFooter || (hasImageVideoTabs && hasPanelControls);
-  }).catch(() => false);
+  const openedState = await getFlowSettingsPanelState(page).catch(() => ({ open: false }));
+  const opened = Boolean(openedState?.open);
 
   if (!opened) {
     await setStatus(jobId, 'SETTING_FLOW', 'Đã click chip setting nhưng chưa xác nhận panel mở.').catch(() => null);
@@ -2221,9 +2340,74 @@ async function clickVisibleCenter(page, selector, timeout = 1500) {
   }
 }
 
+async function clickVideoDownloadConfirmationIfVisible(page, jobId) {
+  const clicked = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 12 && r.height > 12 && r.bottom > 0 && r.right > 0 &&
+        r.top < window.innerHeight && r.left < window.innerWidth &&
+        s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) > 0;
+    };
+    const textOf = (el) => String([
+      el.innerText,
+      el.textContent,
+      el.getAttribute?.('aria-label'),
+      el.getAttribute?.('title'),
+      el.getAttribute?.('data-testid'),
+    ].filter(Boolean).join(' ')).replace(/\s+/g, ' ').trim();
+
+    const wanted = [
+      /^Download video$/i,
+      /^Download$/i,
+      /^Tải xuống$/i,
+      /^Export$/i,
+      /^Save$/i,
+      /MP4/i,
+      /1080p|720p|HD|High quality/i,
+    ];
+
+    const nodes = Array.from(document.querySelectorAll('button,[role="button"],[role="menuitem"],[role="option"],a,li,div,span'))
+      .filter(visible)
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        const text = textOf(el);
+        const clickable = el.closest('button,[role="button"],[role="menuitem"],[role="option"],a,li') || el;
+        const cr = clickable.getBoundingClientRect();
+        const inOverlay = Boolean(el.closest('[role="menu"],[role="dialog"],[role="listbox"],[data-radix-popper-content-wrapper]'));
+        let score = 0;
+        if (wanted.some((rx) => rx.test(text))) score += 500;
+        if (/download|tải|export|save/i.test(text)) score += 250;
+        if (/mp4|1080p|720p|hd|high quality/i.test(text)) score += 220;
+        if (inOverlay) score += 220;
+        if (clickable.matches('button,[role="button"],[role="menuitem"],[role="option"],a')) score += 120;
+        if (cr.top < 80) score -= 600;
+        if (/new project|start creating|settings|help|search|more options/i.test(text)) score -= 500;
+        if (text.length > 120) score -= 150;
+        return { el: clickable, text, score, x: Math.round(cr.left + cr.width / 2), y: Math.round(cr.top + cr.height / 2) };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    const best = nodes[0];
+    if (!best || best.score < 450) return null;
+    best.el.click();
+    return { text: best.text.slice(0, 100), x: best.x, y: best.y, score: best.score };
+  }).catch(() => null);
+
+  if (clicked) {
+    await setStatus(jobId, 'FETCHING_RESULTS', `Xác nhận menu tải video: ${clicked.text || 'download option'} tại ${clicked.x},${clicked.y}.`).catch(() => null);
+    await page.waitForTimeout(Number(env.FLOW_AFTER_DOWNLOAD_CONFIRM_DELAY_MS || 700));
+    return clicked;
+  }
+  return null;
+}
+
 async function waitForDownloadAfterAction(page, action, savePathPrefix, jobId, sourceLabel, options = {}) {
-  const timeout = Number(env.FLOW_DOWNLOAD_TIMEOUT_MS || 45000);
+  const timeout = Number(env.FLOW_DOWNLOAD_TIMEOUT_MS || 120000);
   const outputType = String(options.outputType || 'video').toLowerCase();
+  const startedAt = Date.now();
 
   try {
     const downloadPromise = page.waitForEvent('download', { timeout }).catch((error) => {
@@ -2233,14 +2417,25 @@ async function waitForDownloadAfterAction(page, action, savePathPrefix, jobId, s
 
     await action();
 
-    if (outputType === 'image') {
-      await page.waitForTimeout(Number(env.FLOW_AFTER_DOWNLOAD_MENU_DELAY_MS || 700));
-      await clickFlowImageDownloadQuality(page, jobId, FLOW_IMAGE_DOWNLOAD_QUALITY);
+    let lastAssistAt = 0;
+    while (Date.now() - startedAt < timeout) {
+      const download = await Promise.race([
+        downloadPromise,
+        sleep(900).then(() => null),
+      ]);
+      if (download) return await savePlaywrightDownload(download, savePathPrefix, jobId, sourceLabel);
+
+      if (Date.now() - lastAssistAt > 1800) {
+        lastAssistAt = Date.now();
+        if (outputType === 'image') {
+          await clickFlowImageDownloadQuality(page, jobId, FLOW_IMAGE_DOWNLOAD_QUALITY).catch(() => null);
+        } else {
+          await clickVideoDownloadConfirmationIfVisible(page, jobId).catch(() => null);
+        }
+      }
     }
 
-    const download = await downloadPromise;
-    if (!download) return null;
-    return await savePlaywrightDownload(download, savePathPrefix, jobId, sourceLabel);
+    return null;
   } catch (error) {
     console.warn(`[${jobId}] Lỗi khi chờ download qua ${sourceLabel}: ${error.message}`);
     return null;
@@ -2818,9 +3013,8 @@ async function downloadOrCaptureResult({ context, page, job, prompt, promptIndex
   await uploadResultFile(job, mediaPath, {
     prompt,
     promptIndex,
-    // BUG FIX: Use prompts.length as the source of truth for last-item detection,
-    // because requestedCount can include videosPerPrompt multiplier which doesn't match promptIndex.
-    complete: promptIndex >= Math.max(0, (Array.isArray(job.prompts) ? job.prompts.length : Number(job.requestedCount || 1)) - 1),
+    // Mark complete only after the last generated item, including videosPerPrompt multiplier.
+    complete: promptIndex >= Math.max(0, (Number(job.requestedCount || 0) || ((Array.isArray(job.prompts) ? job.prompts.length : 1) * Math.max(1, Number(job.videosPerPrompt || 1)))) - 1),
   });
 
   return { type: 'file', path: mediaPath };
@@ -2994,8 +3188,23 @@ async function clickRealFlowPromptBox(page, jobId) {
   return point;
 }
 
-async function clickFlowCreateButton(page, jobId) {
-  const point = await page.evaluate(() => {
+async function clickFlowCreateButton(page, jobId, prompt = '') {
+  if (String(prompt || '').trim()) {
+    const verified = await verifyPromptVisibleInComposer(page, jobId, prompt, 'ngay trước khi bấm Create');
+    if (!verified) {
+      await saveDebugArtifacts(page, jobId, 'prompt-not-verified-before-create').catch(() => null);
+      throw new Error('Prompt chưa nằm trong ô Flow nên worker không bấm Create/Generate.');
+    }
+  }
+
+  const panelOpen = await isPanelStillOpen(page);
+  if (panelOpen) {
+    await saveDebugArtifacts(page, jobId, 'panel-open-before-create').catch(() => null);
+    throw new Error('Panel setting/model vẫn mở trước khi bấm Create. Dừng để tránh bấm gửi sai.');
+  }
+
+  const point = await page.evaluate(({ prompt }) => {
+    const needle = String(prompt || '').trim().slice(0, Math.min(28, String(prompt || '').trim().length));
     function visible(el) {
       const r = el.getBoundingClientRect();
       const style = window.getComputedStyle(el);
@@ -3010,31 +3219,67 @@ async function clickFlowCreateButton(page, jobId) {
         Number(style.opacity || 1) > 0;
     }
 
-    const bad = /New project|Start creating|Create with Flow|Create project|Download|More|Menu|Settings|Help|Search/i;
+    function textOf(el) {
+      return [
+        el.value,
+        el.getAttribute('aria-label'),
+        el.getAttribute('title'),
+        el.innerText,
+        el.textContent,
+        el.getAttribute('data-testid'),
+      ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    }
 
-    const candidates = [...document.querySelectorAll('button,[role="button"],a')]
+    function badAncestor(el) {
+      return Boolean(el.closest('[role="search"], form[role="search"], header, nav, aside, [role="menu"], [role="listbox"], [role="dialog"], [aria-modal="true"], [data-testid*="search" i], [aria-label*="search" i]'));
+    }
+
+    const promptCandidates = [...document.querySelectorAll('textarea,input,[contenteditable="true"],[contenteditable="plaintext-only"],[role="textbox"],div,p,span')]
       .filter(visible)
       .map((el) => {
         const r = el.getBoundingClientRect();
-        const text = [
-          el.getAttribute('aria-label'),
-          el.getAttribute('title'),
-          el.innerText,
-          el.textContent,
-          el.getAttribute('data-testid'),
-        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+        const text = textOf(el);
+        let score = 0;
+        if (needle && text.includes(needle)) score += 900;
+        if (/What do you want to create\?|prompt|describe|description/i.test(text)) score += 180;
+        if (r.top > window.innerHeight * 0.42) score += 220;
+        if (r.width > 300) score += 120;
+        if (badAncestor(el)) score -= 1000;
+        if (/search|filter|sort|email|password|login|sign in|đăng nhập/i.test(text)) score -= 1000;
+        return { r, text, score };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    const composer = promptCandidates[0] || null;
+    const composerRect = composer?.r || null;
+    const bad = /New project|Start creating|Create with Flow|Create project|Download|More|Menu|Settings|Help|Search|Filter|Sort|Model|Nano Banana|Veo|Imagen|Image|Video|Frames|Ingredients|16:9|9:16|4:3|1:1|3:4/i;
+
+    const candidates = [...document.querySelectorAll('button,[role="button"],a')]
+      .filter(visible)
+      .filter((el) => !badAncestor(el))
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        const text = textOf(el);
 
         let score = 0;
-
         if (/^(Create|Generate)$/i.test(text) || /Create|Generate|arrow_forward|send/i.test(text)) score += 300;
 
         // Nút tạo của Flow thường là nút tròn bên phải thanh prompt.
         if (r.top > window.innerHeight * 0.55) score += 120;
         if (r.left > window.innerWidth * 0.55) score += 120;
-        if (r.width >= 35 && r.width <= 90 && r.height >= 35 && r.height <= 90) score += 180;
+        if (r.width >= 30 && r.width <= 92 && r.height >= 30 && r.height <= 92) score += 180;
 
-        if (bad.test(text)) score -= 500;
-        if (r.top < 120) score -= 200;
+        if (composerRect) {
+          const cy = r.top + r.height / 2;
+          const py = composerRect.top + composerRect.height / 2;
+          if (Math.abs(cy - py) <= 145) score += 260;
+          if (r.left > composerRect.left + composerRect.width * 0.70) score += 260;
+          if (r.left < composerRect.left + composerRect.width * 0.45) score -= 350;
+        }
+
+        if (bad.test(text)) score -= 800;
+        if (r.top < 120) score -= 250;
 
         return {
           x: Math.round(r.left + r.width / 2),
@@ -3047,46 +3292,211 @@ async function clickFlowCreateButton(page, jobId) {
       .sort((a, b) => b.score - a.score);
 
     return candidates[0] || null;
-  });
+  }, { prompt });
 
   if (!point) {
-    await setStatus(jobId, 'GENERATING', 'Không tìm thấy nút mũi tên/Create bằng DOM, thử Enter.');
-    await page.keyboard.press('Enter');
-    return 'keyboard-enter';
+    await setStatus(jobId, 'GENERATING', 'Không tìm thấy nút mũi tên/Create an toàn; không dùng Enter để tránh gửi nhầm.').catch(() => null);
+    throw new Error('Không tìm thấy nút Create/Generate an toàn cạnh ô prompt Flow.');
   }
 
   await setStatus(jobId, 'GENERATING', `Bấm nút tạo thật tại ${point.x},${point.y}: ${point.label || 'arrow/create'}`);
   await page.mouse.click(point.x, point.y);
+  await page.waitForTimeout(Number(env.FLOW_AFTER_CREATE_CLICK_VERIFY_MS || 1400));
+
+  if (await hasFlowPromptRequiredError(page)) {
+    await saveDebugArtifacts(page, jobId, 'prompt-required-after-create').catch(() => null);
+    throw new Error('Flow báo thiếu prompt sau khi bấm Create. Worker đã dừng để tránh gửi job rỗng.');
+  }
+
   return point.label || 'dom-create-button';
 }
 
 
-async function isPanelStillOpen(page) {
+async function getFlowSettingsPanelState(page) {
   return page.evaluate(() => {
-    const text = String(document.body?.innerText || '').replace(/\s+/g, ' ');
-    const hasPanelFooter = /Generating will use\s+\d+\s+credits|Generating will use\s+0\s+credits/i.test(text);
-    const hasImageVideoTabs = /\bImage\b[\s\S]{0,80}\bVideo\b|\bVideo\b[\s\S]{0,80}\bImage\b/i.test(text);
-    const hasPanelControls = /\bFrames\b|\bIngredients\b|\b16:9\b|\b9:16\b|\b4:3\b|\b1:1\b|\b3:4\b/i.test(text);
-    return hasPanelFooter || (hasImageVideoTabs && hasPanelControls);
-  }).catch(() => false);
+    const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 24 &&
+        r.height > 24 &&
+        r.bottom > 0 &&
+        r.right > 0 &&
+        r.top < window.innerHeight &&
+        r.left < window.innerWidth &&
+        s.display !== 'none' &&
+        s.visibility !== 'hidden' &&
+        Number(s.opacity || 1) > 0;
+    };
+
+    const textOf = (el) => norm([
+      el.innerText,
+      el.textContent,
+      el.getAttribute?.('aria-label'),
+      el.getAttribute?.('title'),
+      el.getAttribute?.('data-testid'),
+    ].filter(Boolean).join(' '));
+
+    const bodyText = norm(document.body?.innerText || '');
+    if (/Generating will use\s+\d+\s+credits|Generating will use\s+0\s+credits/i.test(bodyText)) {
+      return { open: true, reason: 'credits-footer' };
+    }
+
+    const containers = Array.from(document.querySelectorAll([
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      '[data-radix-popper-content-wrapper]',
+      '[role="menu"]',
+      '[role="listbox"]',
+      '[role="presentation"]',
+      'mat-dialog-container',
+      'div',
+      'section',
+    ].join(','))).filter(visible);
+
+    let best = null;
+    for (const el of containers) {
+      const r = el.getBoundingClientRect();
+      if (r.width > window.innerWidth * 0.88 && r.height > window.innerHeight * 0.72) continue;
+      const text = textOf(el);
+      if (!text || text.length > 2500) continue;
+
+      const hasTabs = /\bImage\b[\s\S]{0,120}\bVideo\b|\bVideo\b[\s\S]{0,120}\bImage\b/i.test(text);
+      const hasControls = /\bFrames\b|\bIngredients\b|\b16:9\b|\b9:16\b|\b4:3\b|\b1:1\b|\b3:4\b|\b4s\b|\b6s\b|\b8s\b|\bNano Banana\b|\bImagen\b|\bVeo\b/i.test(text);
+      const hasFooter = /Generating will use\s+\d+\s+credits|Generating will use\s+0\s+credits/i.test(text);
+      const looksLikePanel = hasFooter || (hasTabs && hasControls);
+      if (!looksLikePanel) continue;
+
+      let score = 0;
+      if (hasFooter) score += 500;
+      if (hasTabs) score += 220;
+      if (hasControls) score += 180;
+      if (r.top > window.innerHeight * 0.18) score += 80;
+      if (r.height > 120) score += 60;
+      if (r.width >= 260 && r.width <= 720) score += 60;
+
+      if (!best || score > best.score) {
+        best = {
+          open: true,
+          reason: hasFooter ? 'panel-footer' : 'panel-tabs-controls',
+          score,
+          rect: {
+            x: Math.round(r.left),
+            y: Math.round(r.top),
+            width: Math.round(r.width),
+            height: Math.round(r.height),
+          },
+          text: text.slice(0, 180),
+        };
+      }
+    }
+
+    return best || { open: false, reason: 'not-detected' };
+  }).catch(() => ({ open: false, reason: 'evaluate-failed' }));
 }
 
-async function closeFlowSettingsPanel(page, jobId) {
-  // First attempt: Escape key
+async function isPanelStillOpen(page) {
+  const state = await getFlowSettingsPanelState(page);
+  return Boolean(state?.open);
+}
+
+async function hasFlowPromptRequiredError(page) {
+  return page.evaluate(() => /prompt must be provided|prompt is required|enter a prompt|please provide a prompt|add a prompt|type a prompt/i.test(String(document.body?.innerText || ''))).catch(() => false);
+}
+
+async function getFlowPromptVerification(page, prompt) {
+  const expected = String(prompt || '').trim();
+  const needle = expected.slice(0, Math.min(28, expected.length));
+  return page.evaluate(({ needle }) => {
+    const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return r.width > 10 &&
+        r.height > 10 &&
+        r.bottom > 0 &&
+        r.right > 0 &&
+        r.top < window.innerHeight &&
+        r.left < window.innerWidth &&
+        s.display !== 'none' &&
+        s.visibility !== 'hidden' &&
+        Number(s.opacity || 1) > 0;
+    };
+    const textOf = (el) => norm([
+      el.value,
+      el.innerText,
+      el.textContent,
+      el.getAttribute?.('placeholder'),
+      el.getAttribute?.('aria-label'),
+      el.getAttribute?.('data-placeholder'),
+      el.getAttribute?.('aria-placeholder'),
+    ].filter(Boolean).join(' '));
+    const badContainer = (el) => Boolean(el.closest('[role="search"], form[role="search"], header, nav, aside, [data-testid*="search" i], [aria-label*="search" i], [role="menu"], [role="listbox"], [role="dialog"], [aria-modal="true"]'));
+    const active = document.activeElement;
+    const activeRect = active?.getBoundingClientRect?.();
+    const activeText = active ? textOf(active) : '';
+    const activeBad = Boolean(active && (
+      /search|filter|sort|email|password|login|sign in|đăng nhập/i.test(activeText) ||
+      /search|email|password/i.test(String(active?.getAttribute?.('type') || '')) ||
+      ((activeRect && activeRect.top < window.innerHeight * 0.38) && !/what do you want to create|prompt|describe/i.test(activeText)) ||
+      badContainer(active)
+    ));
+
+    const candidates = Array.from(document.querySelectorAll('textarea,input,[contenteditable="true"],[contenteditable="plaintext-only"],[role="textbox"],div,p,span'))
+      .filter(visible)
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        const text = textOf(el);
+        return {
+          el,
+          text,
+          rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) },
+          bottom: r.top > window.innerHeight * 0.38,
+          bad: badContainer(el) || /search|filter|sort|email|password|login|sign in|đăng nhập/i.test(text),
+        };
+      });
+
+    const match = candidates.find((item) => item.bottom && !item.bad && needle && item.text.includes(needle));
+    return {
+      ok: Boolean(match) && !activeBad,
+      foundText: match?.text?.slice(0, 160) || '',
+      foundRect: match?.rect || null,
+      activeBad: Boolean(activeBad),
+      activeText: activeText.slice(0, 160),
+      activeTag: active ? String(active.tagName || '').toLowerCase() : '',
+      activeRect: activeRect ? { x: Math.round(activeRect.left), y: Math.round(activeRect.top), width: Math.round(activeRect.width), height: Math.round(activeRect.height) } : null,
+    };
+  }, { needle }).catch((error) => ({ ok: false, reason: error.message }));
+}
+
+async function verifyPromptVisibleInComposer(page, jobId, prompt, stage = 'sau nhập prompt') {
+  const verification = await getFlowPromptVerification(page, prompt);
+  if (verification?.ok) {
+    await setStatus(jobId, 'SUBMITTING_PROMPT', `Đã xác nhận prompt nằm trong ô Flow ${stage}.`).catch(() => null);
+    return true;
+  }
+  await setStatus(
+    jobId,
+    'SUBMITTING_PROMPT',
+    `Chưa xác nhận được prompt trong ô Flow ${stage}; worker sẽ không bấm gửi. Active=${verification?.activeTag || 'unknown'} ${verification?.activeText || verification?.reason || ''}`
+  ).catch(() => null);
+  return false;
+}
+
+async function closeFlowSettingsPanel(page, jobId, options = {}) {
+  const strict = options.strict !== false;
   await page.keyboard.press('Escape').catch(() => null);
-  await page.waitForTimeout(Number(env.FLOW_AFTER_CLOSE_SETTINGS_DELAY_MS || 600));
+  await page.waitForTimeout(Number(env.FLOW_AFTER_CLOSE_SETTINGS_DELAY_MS || 650));
 
-  // BUG FIX: Verify the panel is actually closed before returning.
-  // Without this, submitPromptAndCreateStrict runs while the panel is still open
-  // and clicks land on panel elements (chip, model row, tabs) instead of the real prompt box.
-  const maxAttempts = 5;
+  const maxAttempts = Number(env.FLOW_CLOSE_SETTINGS_MAX_ATTEMPTS || 7);
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const stillOpen = await isPanelStillOpen(page);
-    if (!stillOpen) break;
+    const state = await getFlowSettingsPanelState(page);
+    if (!state?.open) break;
 
-    await setStatus(jobId, 'SETTING_FLOW', `Panel setting chưa đóng sau Escape (lần ${attempt + 1}/${maxAttempts}). Worker thử click ngoài panel.`).catch(() => null);
+    await setStatus(jobId, 'SETTING_FLOW', `Panel setting vẫn mở (${state.reason || 'unknown'}, lần ${attempt + 1}/${maxAttempts}). Worker đóng panel trước khi nhập prompt.`).catch(() => null);
 
-    // Try clicking the prompt area to dismiss panel
     const point = await page.evaluate(() => {
       const visible = (el) => {
         if (!el) return false;
@@ -3094,95 +3504,199 @@ async function closeFlowSettingsPanel(page, jobId) {
         const s = window.getComputedStyle(el);
         return r.width > 80 && r.height > 20 && r.bottom > 0 && r.right > 0 &&
           r.top < window.innerHeight && r.left < window.innerWidth &&
-          s.display !== 'none' && s.visibility !== 'hidden';
+          s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) > 0;
       };
-
+      const textOf = (el) => String(
+        el.getAttribute?.('placeholder') ||
+        el.getAttribute?.('aria-label') ||
+        el.getAttribute?.('data-placeholder') ||
+        el.getAttribute?.('aria-placeholder') ||
+        el.innerText ||
+        el.textContent ||
+        ''
+      ).replace(/\s+/g, ' ').trim();
       const nodes = Array.from(document.querySelectorAll('textarea,[role="textbox"],[contenteditable="true"],div,span'))
         .filter(visible)
-        .map((el) => {
-          const r = el.getBoundingClientRect();
-          const text = String(
-            el.getAttribute?.('placeholder') ||
-            el.getAttribute?.('aria-label') ||
-            el.getAttribute?.('data-placeholder') ||
-            el.innerText ||
-            el.textContent ||
-            ''
-          ).replace(/\s+/g, ' ').trim();
-          return { r, text };
-        })
+        .map((el) => ({ el, r: el.getBoundingClientRect(), text: textOf(el) }))
         .filter((x) => /What do you want to create/i.test(x.text) && x.r.top > window.innerHeight * 0.45)
         .sort((a, b) => b.r.top - a.r.top);
-
       const item = nodes[0];
       if (item) {
         return {
-          x: Math.round(item.r.left + Math.min(80, item.r.width / 3)),
+          x: Math.round(item.r.left + Math.min(Math.max(item.r.width * 0.18, 36), Math.max(36, item.r.width - 24))),
           y: Math.round(item.r.top + item.r.height / 2),
+          label: item.text.slice(0, 120),
         };
       }
-
-      // Fallback: click on the top-left area of the composer (outside any panel)
-      return { x: Math.round(window.innerWidth * 0.15), y: Math.round(window.innerHeight * 0.85) };
+      return { x: Math.round(window.innerWidth * 0.18), y: Math.round(window.innerHeight * 0.86), label: 'outside-bottom-left' };
     }).catch(() => null);
 
-    if (point) {
-      await page.mouse.click(point.x, point.y);
-    }
+    if (point) await page.mouse.click(point.x, point.y).catch(() => null);
+    await page.waitForTimeout(250);
     await page.keyboard.press('Escape').catch(() => null);
-    await page.waitForTimeout(Number(env.FLOW_AFTER_CLOSE_SETTINGS_DELAY_MS || 600));
+    await page.waitForTimeout(Number(env.FLOW_AFTER_CLOSE_SETTINGS_DELAY_MS || 650));
   }
 
-  // Final check — log if panel is still open but proceed anyway to avoid deadlock
-  const finalCheck = await isPanelStillOpen(page);
-  if (finalCheck) {
-    await setStatus(jobId, 'SETTING_FLOW', 'Cảnh báo: panel setting có thể vẫn còn mở. Worker vẫn tiếp tục nhập prompt.').catch(() => null);
+  const finalState = await getFlowSettingsPanelState(page);
+  if (finalState?.open) {
+    await saveDebugArtifacts(page, jobId, 'settings-panel-still-open').catch(() => null);
+    const message = `Panel setting/model vẫn mở (${finalState.reason || 'unknown'}). Dừng job để tránh bấm gửi khi chưa nhập prompt.`;
+    await setStatus(jobId, 'SETTING_FLOW', message).catch(() => null);
+    if (strict) throw new Error(message);
   } else {
-    await setStatus(jobId, 'SETTING_FLOW', 'Panel setting đã đóng. Chuẩn bị nhập prompt.').catch(() => null);
+    await setStatus(jobId, 'SETTING_FLOW', 'Panel setting/model đã đóng. Chuẩn bị nhập prompt.').catch(() => null);
   }
 
-  // Small buffer before typing to let UI settle
-  await page.waitForTimeout(Number(env.FLOW_AFTER_CLOSE_PANEL_BUFFER_MS || 400));
+  await page.waitForTimeout(Number(env.FLOW_AFTER_CLOSE_PANEL_BUFFER_MS || 450));
 }
-async function submitPromptAndCreateStrict(page, jobId, prompt) {
-  // BUG FIX: Double-check panel is gone before clicking prompt box.
-  // If closeFlowSettingsPanel didn't finish closing (e.g. slow animation),
-  // clicking the prompt area now will dismiss the panel first click, then we retry.
-  const panelOpen = await isPanelStillOpen(page);
-  if (panelOpen) {
-    await setStatus(jobId, 'SUBMITTING_PROMPT', 'Panel setting vẫn còn mở, đóng lại trước khi nhập prompt.').catch(() => null);
-    await page.keyboard.press('Escape').catch(() => null);
-    await page.waitForTimeout(700);
+
+async function insertPromptIntoFocusedComposer(page, jobId, prompt) {
+  const text = String(prompt || '');
+  const domResult = await page.evaluate(({ text }) => {
+    const el = document.activeElement;
+    if (!el) return { ok: false, reason: 'no-active-element' };
+
+    const tag = String(el.tagName || '').toLowerCase();
+    const type = String(el.getAttribute?.('type') || '').toLowerCase();
+    const isEditable = tag === 'textarea' || tag === 'input' || el.getAttribute?.('contenteditable') === 'true' || el.getAttribute?.('role') === 'textbox';
+    const bad = type === 'search' || type === 'email' || type === 'password';
+    if (!isEditable || bad) return { ok: false, reason: `active-not-composer:${tag}:${type}` };
+
+    const dispatchInput = (target, value) => {
+      try {
+        target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: value }));
+      } catch { }
+      try {
+        target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+      } catch {
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+
+    if (tag === 'textarea' || tag === 'input') {
+      const proto = tag === 'textarea' ? window.HTMLTextAreaElement?.prototype : window.HTMLInputElement?.prototype;
+      const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+      if (descriptor?.set) descriptor.set.call(el, '');
+      else el.value = '';
+      dispatchInput(el, '');
+      if (descriptor?.set) descriptor.set.call(el, text);
+      else el.value = text;
+      dispatchInput(el, text);
+      return { ok: true, method: `native-${tag}`, length: text.length };
+    }
+
+    el.focus();
+    const selection = window.getSelection?.();
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand('insertText', false, text);
+    } catch {
+      el.textContent = text;
+    }
+    dispatchInput(el, text);
+
+    const current = String(el.innerText || el.textContent || '');
+    if (!current.includes(text.slice(0, Math.min(30, text.length)))) {
+      el.textContent = text;
+      dispatchInput(el, text);
+    }
+    return { ok: true, method: 'contenteditable-fast', length: text.length };
+  }, { text }).catch((error) => ({ ok: false, reason: error.message }));
+
+  if (domResult?.ok) {
+    await setStatus(jobId, 'SUBMITTING_PROMPT', `Đã nhập prompt nhanh bằng ${domResult.method}, ${domResult.length} ký tự.`).catch(() => null);
+    return domResult.method;
   }
+
+  await setStatus(jobId, 'SUBMITTING_PROMPT', `DOM paste chưa được (${domResult?.reason || 'unknown'}), dùng keyboard.insertText fallback.`).catch(() => null);
+  try {
+    await page.keyboard.insertText(text);
+    return 'keyboard-insertText';
+  } catch {
+    await page.keyboard.type(text, { delay: Number(env.FLOW_KEYBOARD_TYPE_DELAY_MS || 0) });
+    return 'keyboard-type-fallback';
+  }
+}
+
+async function submitPromptAndCreateStrict(page, jobId, prompt) {
+  const promptText = String(prompt || '').trim();
+  if (!promptText) throw new Error('Prompt rỗng, worker không gửi lên Flow.');
+
+  // Luôn đóng panel setting/model trước khi nhập. Nếu không đóng được thì dừng,
+  // tuyệt đối không click Create khi prompt chưa nằm trong composer thật.
+  await closeFlowSettingsPanel(page, jobId, { strict: true });
 
   await clickRealFlowPromptBox(page, jobId);
 
-  // After clicking, check if panel re-opened (e.g. click landed on chip/settings area)
   const panelOpenAfterClick = await isPanelStillOpen(page);
   if (panelOpenAfterClick) {
-    await setStatus(jobId, 'SUBMITTING_PROMPT', 'Click ô prompt vô tình mở panel lại. Đóng panel và thử lại.').catch(() => null);
-    await page.keyboard.press('Escape').catch(() => null);
-    await page.waitForTimeout(600);
+    await setStatus(jobId, 'SUBMITTING_PROMPT', 'Click ô prompt vô tình mở panel setting/model. Đóng panel và click lại prompt.').catch(() => null);
+    await closeFlowSettingsPanel(page, jobId, { strict: true });
     await clickRealFlowPromptBox(page, jobId);
   }
 
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => null);
-  await page.keyboard.type(String(prompt || ''), { delay: 1 });
+  await page.keyboard.press('Backspace').catch(() => null);
+  await insertPromptIntoFocusedComposer(page, jobId, promptText);
+  await page.waitForTimeout(Number(env.FLOW_AFTER_PROMPT_DELAY_MS || 450));
 
-  await page.waitForTimeout(Number(env.FLOW_AFTER_PROMPT_DELAY_MS || 500));
-  await clickFlowCreateButton(page, jobId);
+  let verified = await verifyPromptVisibleInComposer(page, jobId, promptText, 'sau lần nhập thứ nhất');
+  if (!verified) {
+    await setStatus(jobId, 'SUBMITTING_PROMPT', 'Prompt chưa vào composer sau lần 1, worker thử focus và nhập lại lần 2.').catch(() => null);
+    await closeFlowSettingsPanel(page, jobId, { strict: true });
+    await clickRealFlowPromptBox(page, jobId);
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => null);
+    await page.keyboard.press('Backspace').catch(() => null);
+    await page.keyboard.insertText(promptText).catch(async () => {
+      await page.keyboard.type(promptText, { delay: Number(env.FLOW_KEYBOARD_TYPE_DELAY_MS || 4) });
+    });
+    await page.waitForTimeout(Number(env.FLOW_AFTER_PROMPT_DELAY_MS || 550));
+    verified = await verifyPromptVisibleInComposer(page, jobId, promptText, 'sau lần nhập thứ hai');
+  }
+
+  if (!verified) {
+    await saveDebugArtifacts(page, jobId, 'prompt-not-in-composer').catch(() => null);
+    throw new Error('Không xác nhận được prompt đã nằm trong ô Flow. Worker dừng, không bấm Create/Generate.');
+  }
+
+  await closeFlowSettingsPanel(page, jobId, { strict: true });
+  await clickFlowCreateButton(page, jobId, promptText);
+}
+
+
+async function getOrCreateBrowserContext() {
+  if (FLOW_KEEP_BROWSER_OPEN && CACHED_BROWSER_CONTEXT) {
+    try {
+      const pages = CACHED_BROWSER_CONTEXT.pages();
+      if (pages.some((page) => !page.isClosed?.())) return CACHED_BROWSER_CONTEXT;
+    } catch {
+      CACHED_BROWSER_CONTEXT = null;
+    }
+  }
+
+  const context = await launchFlowBrowserContext(CHROME_PROFILE_DIR, 'windows-flow-worker');
+
+  if (FLOW_KEEP_BROWSER_OPEN) {
+    CACHED_BROWSER_CONTEXT = context;
+    context.on('close', () => {
+      if (CACHED_BROWSER_CONTEXT === context) CACHED_BROWSER_CONTEXT = null;
+    });
+  }
+
+  return context;
 }
 
 async function automateWithPlaywright(job) {
   await fs.mkdir(DOWNLOAD_DIR, { recursive: true });
-  await setStatus(job.jobId, 'OPENING_FLOW', 'Worker đang mở Chrome và vào Flow.');
+  await setStatus(job.jobId, 'OPENING_FLOW', FLOW_KEEP_BROWSER_OPEN && CACHED_BROWSER_CONTEXT
+    ? 'Worker dùng lại Chrome Flow đã mở.'
+    : 'Worker đang mở Chrome và vào Flow.');
 
-  const context = await chromium.launchPersistentContext(CHROME_PROFILE_DIR, {
-    headless: false,
-    executablePath: CHROME_EXECUTABLE_PATH,
-    acceptDownloads: true,
-    viewport: null,
-  });
+  const context = await getOrCreateBrowserContext();
 
   const page = context.pages()[0] || await context.newPage();
   const heartbeatTimer = setInterval(() => heartbeat(job.jobId, 'Worker vẫn đang thao tác Flow.'), HEARTBEAT_INTERVAL_MS);
