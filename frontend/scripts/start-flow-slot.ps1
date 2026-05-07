@@ -40,13 +40,17 @@ $env:FLOW_JOB_STORE_DIR = $jobs
 $env:FLOW_WORKER_MODE = "playwright"
 if (-not $env:FLOW_API_BASE_URL) { $env:FLOW_API_BASE_URL = "http://127.0.0.1:3000" }
 
-# Each slot has its own profile. Default closes Chrome after job to avoid profile lock.
+# Each slot has its own profile. Default closes Chrome after every job so the next job starts clean.
 if ($KeepChromeOpen) {
   $env:FLOW_KEEP_BROWSER_OPEN = "true"
-} elseif (-not $env:FLOW_KEEP_BROWSER_OPEN) {
-  # Giữ profile Chrome mở trong từng slot để không phải setup lại cho mỗi job.
-  $env:FLOW_KEEP_BROWSER_OPEN = "true"
+  $env:FLOW_CLOSE_AFTER_JOB = "false"
+} else {
+  $env:FLOW_KEEP_BROWSER_OPEN = "false"
+  $env:FLOW_CLOSE_AFTER_JOB = "true"
 }
+if (-not $env:FLOW_FORCE_NEW_PROJECT_EACH_PROMPT) { $env:FLOW_FORCE_NEW_PROJECT_EACH_PROMPT = "true" }
+if (-not $env:FLOW_REQUIRE_FRESH_PROJECT) { $env:FLOW_REQUIRE_FRESH_PROJECT = "true" }
+if (-not $env:FLOW_NEW_PAGE_PER_PROMPT) { $env:FLOW_NEW_PAGE_PER_PROMPT = "true" }
 
 # Reduce aggressive polling in multi-slot mode.
 if (-not $env:FLOW_WORKER_POLL_INTERVAL_MS) { $env:FLOW_WORKER_POLL_INTERVAL_MS = "3000" }

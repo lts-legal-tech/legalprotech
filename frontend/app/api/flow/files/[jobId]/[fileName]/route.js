@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import { Readable } from 'stream';
+import { getRequestAccess, readFlowJob, userCanAccessFlowJob } from '../../../../../../lib/flow-job-store';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -186,6 +187,11 @@ function buildFilePath(jobId, fileName) {
 
 async function serveFile(request, params, headOnly = false) {
   const { jobId, fileName } = await params;
+  const job = await readFlowJob(jobId);
+  if (!job) return new Response('Job not found', { status: 404 });
+  if (!userCanAccessFlowJob(job, getRequestAccess(request))) {
+    return new Response('Không có quyền xem file của user khác.', { status: 403 });
+  }
   const filePath = buildFilePath(jobId, fileName);
 
   if (!fs.existsSync(filePath)) {

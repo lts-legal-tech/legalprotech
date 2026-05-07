@@ -1,7 +1,9 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { Bot, Loader2, Plus, Send, Sparkles, MessageSquareText, Film, Image as ImageIcon, ClipboardList } from 'lucide-react';
 import { CHATBOT_PROJECT_SEED } from '../lib/tools';
+import { getCurrentUserScope, scopedStorageKey } from '../lib/user-scope-client';
 
 const STORAGE_KEY = 'ai-workspace-projects';
 const CHAT_KEY = 'ai-workspace-chat-history';
@@ -15,30 +17,30 @@ const MODES = [
   { id: 'shot_list', label: 'Làm shot list', icon: ClipboardList, description: 'Tách ý tưởng thành shot list rõ ràng để giao dựng hoặc đưa sang AI video workflow.' },
 ];
 
-function readProjects() {
+function readProjects(userId = getCurrentUserScope().userId) {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(scopedStorageKey(STORAGE_KEY, userId));
     if (!raw) return CHATBOT_PROJECT_SEED;
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) && parsed.length ? parsed : CHATBOT_PROJECT_SEED;
   } catch { return CHATBOT_PROJECT_SEED; }
 }
-function readHistory() {
+function readHistory(userId = getCurrentUserScope().userId) {
   try {
-    const raw = window.localStorage.getItem(CHAT_KEY);
+    const raw = window.localStorage.getItem(scopedStorageKey(CHAT_KEY, userId));
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch { return {}; }
 }
-function saveProjects(projects) {
+function saveProjects(projects, userId = getCurrentUserScope().userId) {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
-    window.dispatchEvent(new CustomEvent(PROJECT_EVENT, { detail: projects }));
+    window.localStorage.setItem(scopedStorageKey(STORAGE_KEY, userId), JSON.stringify(projects));
+    window.dispatchEvent(new CustomEvent(PROJECT_EVENT, { detail: { projects, userId } }));
   } catch {}
 }
-function saveHistory(history) {
-  try { window.localStorage.setItem(CHAT_KEY, JSON.stringify(history)); } catch {}
+function saveHistory(history, userId = getCurrentUserScope().userId) {
+  try { window.localStorage.setItem(scopedStorageKey(CHAT_KEY, userId), JSON.stringify(history)); } catch {}
 }
 
 function RichText({ text }) {
@@ -47,6 +49,9 @@ function RichText({ text }) {
 }
 
 export function ChatbotWorkspace({ projectId }) {
+  const searchParams = useSearchParams();
+  const selectedProjectId = projectId || searchParams.get('project') || '';
+  const [userId, setUserId] = useState('');
   const [projects, setProjects] = useState(CHATBOT_PROJECT_SEED);
   const [history, setHistory] = useState({});
   const [mode, setMode] = useState('prompt');
@@ -56,12 +61,19 @@ export function ChatbotWorkspace({ projectId }) {
   const listRef = useRef(null);
 
   useEffect(() => {
-    setProjects(readProjects());
-    setHistory(readHistory());
-    const syncProjects = (event) => setProjects(event?.detail && Array.isArray(event.detail) ? event.detail : readProjects());
+    const currentUserId = getCurrentUserScope().userId || 'anonymous';
+    setUserId(currentUserId);
+    setProjects(readProjects(currentUserId));
+    setHistory(readHistory(currentUserId));
+    const syncProjects = (event) => {
+      const nextUserId = getCurrentUserScope().userId || 'anonymous';
+      if (event?.detail?.userId && event.detail.userId !== nextUserId) return;
+      setProjects(Array.isArray(event?.detail?.projects) ? event.detail.projects : readProjects(nextUserId));
+    };
     const syncStorage = (event) => {
-      if (event.key === STORAGE_KEY) setProjects(readProjects());
-      if (event.key === CHAT_KEY) setHistory(readHistory());
+      const nextUserId = getCurrentUserScope().userId || 'anonymous';
+      if (event.key === scopedStorageKey(STORAGE_KEY, nextUserId)) setProjects(readProjects(nextUserId));
+      if (event.key === scopedStorageKey(CHAT_KEY, nextUserId)) setHistory(readHistory(nextUserId));
     };
     window.addEventListener(PROJECT_EVENT, syncProjects);
     window.addEventListener('storage', syncStorage);
@@ -71,10 +83,10 @@ export function ChatbotWorkspace({ projectId }) {
     };
   }, []);
 
-  useEffect(() => { saveHistory(history); }, [history]);
-  useEffect(() => { if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight; }, [projectId, history, loading]);
+  useEffect(() => { if (userId) saveHistory(history, userId); }, [history, userId]);
+  useEffect(() => { if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight; }, [selectedProjectId, history, loading]);
 
-  const activeProject = useMemo(() => projects.find((item) => item.id === projectId) || projects[0] || CHATBOT_PROJECT_SEED[0], [projects, projectId]);
+  const activeProject = useMemo(() => projects.find((item) => item.id === selectedProjectId) || projects[0] || CHATBOT_PROJECT_SEED[0], [projects, selectedProjectId]);
   const activeMode = MODES.find((item) => item.id === mode) || MODES[0];
 
   const messages = history[activeProject?.id] || [{
@@ -118,7 +130,7 @@ export function ChatbotWorkspace({ projectId }) {
     const next = { id: `proj-${Date.now()}`, name: `Dự án mới ${projects.length + 1}`, type: mode };
     const merged = [next, ...projects];
     setProjects(merged);
-    saveProjects(merged);
+    saveProjects(merged, userId);
   }
 
   return (

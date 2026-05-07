@@ -48,6 +48,10 @@ const CHROME_EXECUTABLE_PATH = env.CHROME_EXECUTABLE_PATH || undefined;
 const DOWNLOAD_DIR = env.FLOW_DOWNLOAD_DIR || path.join(process.cwd(), '.flow-downloads');
 const FLOW_LOGIN_WAIT_MS = Number(env.FLOW_LOGIN_WAIT_MS || 600000);
 const FLOW_KEEP_BROWSER_OPEN = String(env.FLOW_KEEP_BROWSER_OPEN || 'true').toLowerCase() === 'true';
+const FLOW_CLOSE_AFTER_JOB = String(env.FLOW_CLOSE_AFTER_JOB || 'true').toLowerCase() !== 'false';
+const FLOW_FORCE_NEW_PROJECT_EACH_PROMPT = String(env.FLOW_FORCE_NEW_PROJECT_EACH_PROMPT || 'true').toLowerCase() !== 'false';
+const FLOW_REQUIRE_FRESH_PROJECT = String(env.FLOW_REQUIRE_FRESH_PROJECT || 'true').toLowerCase() !== 'false';
+const FLOW_NEW_PAGE_PER_PROMPT = String(env.FLOW_NEW_PAGE_PER_PROMPT || 'true').toLowerCase() !== 'false';
 const FLOW_STRICT_MODEL = String(env.FLOW_STRICT_MODEL || 'true').toLowerCase() !== 'false';
 const FLOW_IMAGE_DOWNLOAD_QUALITY = String(env.FLOW_IMAGE_DOWNLOAD_QUALITY || '2K').trim().toUpperCase();
 const FLOW_AFTER_CREATE_DELAY_MS = Number(env.FLOW_AFTER_CREATE_DELAY_MS || 5000);
@@ -93,6 +97,7 @@ async function launchFlowBrowserContext(userDataDir, ownerLabel = 'windows-flow-
         headless: false,
         executablePath: CHROME_EXECUTABLE_PATH,
         acceptDownloads: true,
+        permissions: ['clipboard-read', 'clipboard-write'],
         viewport: { width: FLOW_CHROME_WINDOW_WIDTH, height: FLOW_CHROME_WINDOW_HEIGHT },
         screen: { width: FLOW_CHROME_WINDOW_WIDTH, height: FLOW_CHROME_WINDOW_HEIGHT },
         args: chromeLaunchArgs(),
@@ -992,7 +997,7 @@ async function applyFlowSettingsRobust(page, jobId, job) {
   }
 
   const duration = String(job.duration || env.FLOW_DEFAULT_DURATION || '').trim();
-  if (duration) {
+  if (duration && getJobOutputType(job) === 'video') {
     if (FLOW_FORCE_COORDINATES) {
       await clickEnvPoint(page, 'FLOW_DURATION_CLICK', jobId, 'Mở thời lượng theo tọa độ', { status: 'SETTING_FLOW' }).catch(() => null);
       await clickEnvPoint(page, 'FLOW_DURATION_OPTION_CLICK', jobId, 'Chọn thời lượng theo tọa độ', { status: 'SETTING_FLOW' }).catch(() => null);
@@ -1003,15 +1008,15 @@ async function applyFlowSettingsRobust(page, jobId, job) {
     }
   }
 
-  const videosPerPrompt = Math.max(1, Math.min(Number(job.videosPerPrompt || env.FLOW_VIDEOS_PER_PROMPT || 1), 4));
-  if (videosPerPrompt) {
+  const multiplierCount = Math.max(1, Math.min(Number(job.videosPerPrompt || job.countPerPrompt || env.FLOW_VIDEOS_PER_PROMPT || 1), 4));
+  if (multiplierCount) {
     if (FLOW_FORCE_COORDINATES) {
       await clickEnvPoint(page, 'FLOW_COUNT_CLICK', jobId, 'Mở số lượng video/prompt theo tọa độ', { status: 'SETTING_FLOW' }).catch(() => null);
       await clickEnvPoint(page, 'FLOW_COUNT_OPTION_CLICK', jobId, 'Chọn số lượng video/prompt theo tọa độ', { status: 'SETTING_FLOW' }).catch(() => null);
     }
     if (!FLOW_FORCE_COORDINATES) {
-      const countLabels = [`x${videosPerPrompt}`, `×${videosPerPrompt}`, `${videosPerPrompt} video`, `${videosPerPrompt}`];
-      await maybeSelectByLabels(page, jobId, 'số video/prompt', ['Outputs', 'Output', 'Videos', 'Video', 'Count', 'x1', 'x2', 'x3', 'x4'], countLabels).catch(() => null);
+      const countLabels = [`x${multiplierCount}`, `×${multiplierCount}`, `${multiplierCount} video`, `${multiplierCount}`];
+      await maybeSelectByLabels(page, jobId, getJobOutputType(job) === 'image' ? 'số ảnh/prompt' : 'số video/prompt', ['Outputs', 'Output', 'Videos', 'Video', 'Count', 'x1', 'x2', 'x3', 'x4'], countLabels).catch(() => null);
     }
   }
 }
@@ -2268,6 +2273,82 @@ async function clickFlowStageButtons(page, jobId) {
   return clickedAny;
 }
 
+
+async function openNewFlowPage(context, jobId, { closeExisting = true } = {}) {
+  if (!context) throw new Error('Chrome context không sẵn sàng để mở Flow.');
+  const existingPages = context.pages?.() || [];
+  const page = await context.newPage();
+  if (closeExisting) {
+    for (const oldPage of existingPages) {
+      if (oldPage === page) continue;
+      await oldPage.close({ runBeforeUnload: false }).catch(() => null);
+    }
+  }
+  await page.goto(FLOW_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
+  await page.waitForTimeout(Number(env.FLOW_AFTER_OPEN_DELAY_MS || 5000));
+  await enableCoordinateLogger(page).catch(() => null);
+  await setStatus(jobId, 'OPENING_FLOW', 'Worker đã mở tab Flow mới để tránh dính project/download cũ.').catch(() => null);
+  return page;
+}
+
+async function forceFreshFlowProject(page, jobId, label = '') {
+  if (!FLOW_FORCE_NEW_PROJECT_EACH_PROMPT) return false;
+
+  await setStatus(jobId, 'CREATING_PROJECT', `Đang mở project Flow mới${label ? ` cho ${label}` : ''}, không dùng lại project cũ.`).catch(() => null);
+  await page.keyboard.press('Escape').catch(() => null);
+  await page.waitForTimeout(350);
+
+  let createdFreshProject = false;
+  const rounds = Math.max(2, Number(env.FLOW_FRESH_PROJECT_ROUNDS || 5));
+
+  for (let round = 0; round < rounds; round += 1) {
+    const startBefore = await hasStartCreatingScreen(page).catch(() => false);
+    if (startBefore) {
+      const startCard = await clickFlowStartCreatingCardAuto(page, jobId).catch(() => null);
+      if (startCard) createdFreshProject = true;
+      const composerAfterStart = await detectFlowComposer(page).catch(() => null);
+      if (composerAfterStart?.ready && createdFreshProject) {
+        await setStatus(jobId, 'FLOW_READY', `Đã vào composer trong project Flow mới: ${composerAfterStart.promptText || 'ready'}`).catch(() => null);
+        return true;
+      }
+    }
+
+    const newProject = await clickFlowNewProjectAuto(page, jobId).catch(() => null);
+    if (newProject) {
+      createdFreshProject = true;
+      await page.waitForTimeout(Number(env.FLOW_AFTER_NEW_PROJECT_DELAY_MS || 900));
+    }
+
+    const startAfterNew = await hasStartCreatingScreen(page).catch(() => false);
+    if (startAfterNew) {
+      const startCard = await clickFlowStartCreatingCardAuto(page, jobId).catch(() => null);
+      if (startCard) createdFreshProject = true;
+      await page.waitForTimeout(Number(env.FLOW_AFTER_STAGE_CLICK_DELAY_MS || 900));
+    }
+
+    const composer = await detectFlowComposer(page).catch(() => null);
+    if (composer?.ready && createdFreshProject) {
+      await setStatus(jobId, 'FLOW_READY', `Đã vào composer trong project Flow mới: ${composer.promptText || 'ready'}`).catch(() => null);
+      return true;
+    }
+
+    // Nếu đang bị kẹt trong project cũ, quay lại URL Flow gốc để hiện nút New project rồi thử lại.
+    if (!createdFreshProject || round === 1) {
+      await page.goto(FLOW_URL, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => null);
+      await page.waitForTimeout(Number(env.FLOW_AFTER_OPEN_DELAY_MS || 1200));
+    }
+  }
+
+  const composer = await detectFlowComposer(page).catch(() => null);
+  if (composer?.ready && !FLOW_REQUIRE_FRESH_PROJECT) {
+    await setStatus(jobId, 'FLOW_READY', 'Không xác nhận được project mới, tiếp tục theo FLOW_REQUIRE_FRESH_PROJECT=false.').catch(() => null);
+    return false;
+  }
+
+  await saveDebugArtifacts(page, jobId, 'fresh-project-not-created').catch(() => null);
+  throw new Error('Không tạo/xác nhận được project Flow mới. Worker dừng để tránh chạy prompt mới trong project cũ và tải nhầm kết quả cũ.');
+}
+
 async function waitForAnyResultSignal(page, jobId) {
   const timeoutMs = Number(env.FLOW_RESULT_READY_TIMEOUT_MS || env.FLOW_GENERATE_WAIT_MS || 240000);
   const deadline = Date.now() + timeoutMs;
@@ -3336,12 +3417,8 @@ async function getFlowSettingsPanelState(page) {
       el.getAttribute?.('aria-label'),
       el.getAttribute?.('title'),
       el.getAttribute?.('data-testid'),
+      el.getAttribute?.('data-state'),
     ].filter(Boolean).join(' '));
-
-    const bodyText = norm(document.body?.innerText || '');
-    if (/Generating will use\s+\d+\s+credits|Generating will use\s+0\s+credits/i.test(bodyText)) {
-      return { open: true, reason: 'credits-footer' };
-    }
 
     const containers = Array.from(document.querySelectorAll([
       '[role="dialog"]',
@@ -3350,6 +3427,7 @@ async function getFlowSettingsPanelState(page) {
       '[role="menu"]',
       '[role="listbox"]',
       '[role="presentation"]',
+      '[data-state="open"]',
       'mat-dialog-container',
       'div',
       'section',
@@ -3358,23 +3436,29 @@ async function getFlowSettingsPanelState(page) {
     let best = null;
     for (const el of containers) {
       const r = el.getBoundingClientRect();
-      if (r.width > window.innerWidth * 0.88 && r.height > window.innerHeight * 0.72) continue;
+      if (r.width > window.innerWidth * 0.94 && r.height > window.innerHeight * 0.82) continue;
       const text = textOf(el);
-      if (!text || text.length > 2500) continue;
+      if (!text || text.length > 1800) continue;
 
       const hasTabs = /\bImage\b[\s\S]{0,120}\bVideo\b|\bVideo\b[\s\S]{0,120}\bImage\b/i.test(text);
-      const hasControls = /\bFrames\b|\bIngredients\b|\b16:9\b|\b9:16\b|\b4:3\b|\b1:1\b|\b3:4\b|\b4s\b|\b6s\b|\b8s\b|\bNano Banana\b|\bImagen\b|\bVeo\b/i.test(text);
+      const hasControls = /\bFrames\b|\bIngredients\b|\b16:9\b|\b9:16\b|\b4:3\b|\b1:1\b|\b3:4\b|\bx1\b|\bx2\b|\bx3\b|\bx4\b|\b4s\b|\b6s\b|\b8s\b|\bNano Banana\b|\bImagen\b|\bVeo\b/i.test(text);
       const hasFooter = /Generating will use\s+\d+\s+credits|Generating will use\s+0\s+credits/i.test(text);
-      const looksLikePanel = hasFooter || (hasTabs && hasControls);
+      const hasModeRow = /crop_16_9|crop_9_16|crop_square|arrow_drop_down|arrow_forward/i.test(text);
+      const looksLikePanel = (hasTabs && hasControls) || (hasFooter && (hasControls || hasModeRow));
       if (!looksLikePanel) continue;
 
       let score = 0;
-      if (hasFooter) score += 500;
-      if (hasTabs) score += 220;
-      if (hasControls) score += 180;
-      if (r.top > window.innerHeight * 0.18) score += 80;
-      if (r.height > 120) score += 60;
-      if (r.width >= 260 && r.width <= 720) score += 60;
+      if (hasFooter) score += 240;
+      if (hasTabs) score += 180;
+      if (hasControls) score += 160;
+      if (hasModeRow) score += 80;
+      if (r.top > window.innerHeight * 0.08) score += 50;
+      if (r.top > window.innerHeight * 0.18) score += 35;
+      if (r.height > 90) score += 40;
+      if (r.width >= 240 && r.width <= 760) score += 50;
+      if (r.left > window.innerWidth * 0.10 && r.right < window.innerWidth * 0.95) score += 30;
+      if (r.top > window.innerHeight * 0.75) score -= 120;
+      if (r.height < 50) score -= 60;
 
       if (!best || score > best.score) {
         best = {
@@ -3392,7 +3476,7 @@ async function getFlowSettingsPanelState(page) {
       }
     }
 
-    return best || { open: false, reason: 'not-detected' };
+    return best && best.score >= 180 ? best : { open: false, reason: 'not-detected' };
   }).catch(() => ({ open: false, reason: 'evaluate-failed' }));
 }
 
@@ -3486,7 +3570,7 @@ async function verifyPromptVisibleInComposer(page, jobId, prompt, stage = 'sau n
 }
 
 async function closeFlowSettingsPanel(page, jobId, options = {}) {
-  const strict = options.strict !== false;
+  const strict = options.strict === true;
   await page.keyboard.press('Escape').catch(() => null);
   await page.waitForTimeout(Number(env.FLOW_AFTER_CLOSE_SETTINGS_DELAY_MS || 650));
 
@@ -3495,7 +3579,7 @@ async function closeFlowSettingsPanel(page, jobId, options = {}) {
     const state = await getFlowSettingsPanelState(page);
     if (!state?.open) break;
 
-    await setStatus(jobId, 'SETTING_FLOW', `Panel setting vẫn mở (${state.reason || 'unknown'}, lần ${attempt + 1}/${maxAttempts}). Worker đóng panel trước khi nhập prompt.`).catch(() => null);
+    await setStatus(jobId, 'SETTING_FLOW', `Panel setting vẫn có vẻ đang mở (${state.reason || 'unknown'}, lần ${attempt + 1}/${maxAttempts}). Worker thử đóng panel nhưng sẽ không chặn bước nhập prompt.`).catch(() => null);
 
     const point = await page.evaluate(() => {
       const visible = (el) => {
@@ -3540,9 +3624,9 @@ async function closeFlowSettingsPanel(page, jobId, options = {}) {
   const finalState = await getFlowSettingsPanelState(page);
   if (finalState?.open) {
     await saveDebugArtifacts(page, jobId, 'settings-panel-still-open').catch(() => null);
-    const message = `Panel setting/model vẫn mở (${finalState.reason || 'unknown'}). Dừng job để tránh bấm gửi khi chưa nhập prompt.`;
+    const message = `Panel setting/model vẫn có thể đang mở (${finalState.reason || 'unknown'}). Worker tiếp tục focus vào composer và nhập prompt để tránh treo flow.`;
     await setStatus(jobId, 'SETTING_FLOW', message).catch(() => null);
-    if (strict) throw new Error(message);
+    if (strict && String(process.env.FLOW_STRICT_CLOSE_SETTINGS || 'false').toLowerCase() === 'true') throw new Error(message);
   } else {
     await setStatus(jobId, 'SETTING_FLOW', 'Panel setting/model đã đóng. Chuẩn bị nhập prompt.').catch(() => null);
   }
@@ -3552,6 +3636,81 @@ async function closeFlowSettingsPanel(page, jobId, options = {}) {
 
 async function insertPromptIntoFocusedComposer(page, jobId, prompt) {
   const text = String(prompt || '');
+  if (!text.trim()) throw new Error('Prompt rỗng, không nhập vào Flow.');
+
+  async function nudgeActiveInputEvents(method = 'nudge') {
+    return page.evaluate(({ text, method }) => {
+      const el = document.activeElement;
+      if (!el) return { ok: false, reason: 'no-active-element', method };
+      const dispatch = (target) => {
+        try { target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: text })); } catch { }
+        try { target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })); } catch { target.dispatchEvent(new Event('input', { bubbles: true })); }
+        target.dispatchEvent(new Event('change', { bubbles: true }));
+        target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Process' }));
+        try { target.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: text })); } catch { }
+      };
+      dispatch(el);
+      const child = el.querySelector?.('textarea,input,[contenteditable="true"],[contenteditable="plaintext-only"],[role="textbox"]');
+      if (child && child !== el) dispatch(child);
+      return { ok: true, method };
+    }, { text, method }).catch((error) => ({ ok: false, reason: error.message, method }));
+  }
+
+  async function verifyLocal(stage) {
+    const verification = await getFlowPromptVerification(page, text).catch((error) => ({ ok: false, reason: error.message }));
+    console.log(`[${jobId}] prompt verification ${stage}:`, verification);
+    return verification;
+  }
+
+  // Đường chính: nhập bằng Playwright keyboard/CDP vào element đang focus.
+  // Không set textContent trực tiếp làm đường chính vì React/ProseMirror có thể hiển thị chữ
+  // nhưng state nội bộ vẫn rỗng, khiến Flow báo "prompt must be provided" khi bấm Generate.
+  await page.keyboard.insertText(text).catch(async () => {
+    await page.keyboard.type(text, { delay: Number(env.FLOW_KEYBOARD_TYPE_DELAY_MS || 4) });
+  });
+  await nudgeActiveInputEvents('keyboard-insertText');
+  await page.waitForTimeout(Number(env.FLOW_AFTER_PROMPT_DELAY_MS || 650));
+  let verification = await verifyLocal('after-keyboard-insertText');
+  if (verification?.ok) {
+    await setStatus(jobId, 'SUBMITTING_PROMPT', `Đã nhập prompt bằng keyboard.insertText, ${text.length} ký tự.`).catch(() => null);
+    return 'keyboard-insertText';
+  }
+
+  // Paste fallback: editor Flow thường nhận paste như thao tác người dùng thật hơn DOM mutation.
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => null);
+  await page.keyboard.press('Backspace').catch(() => null);
+  const pasted = await page.evaluate(async (value) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }, text).catch(() => false);
+  if (pasted) {
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+V' : 'Control+V').catch(() => null);
+    await nudgeActiveInputEvents('clipboard-paste');
+    await page.waitForTimeout(Number(env.FLOW_AFTER_PROMPT_DELAY_MS || 850));
+    verification = await verifyLocal('after-clipboard-paste');
+    if (verification?.ok) {
+      await setStatus(jobId, 'SUBMITTING_PROMPT', `Đã nhập prompt bằng clipboard paste, ${text.length} ký tự.`).catch(() => null);
+      return 'clipboard-paste';
+    }
+  }
+
+  // Keyboard.type fallback sau khi clear lại.
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => null);
+  await page.keyboard.press('Backspace').catch(() => null);
+  await page.keyboard.type(text, { delay: Number(env.FLOW_KEYBOARD_TYPE_DELAY_MS || 5) }).catch(() => null);
+  await nudgeActiveInputEvents('keyboard-type');
+  await page.waitForTimeout(Number(env.FLOW_AFTER_PROMPT_DELAY_MS || 850));
+  verification = await verifyLocal('after-keyboard-type');
+  if (verification?.ok) {
+    await setStatus(jobId, 'SUBMITTING_PROMPT', `Đã nhập prompt bằng keyboard.type, ${text.length} ký tự.`).catch(() => null);
+    return 'keyboard-type';
+  }
+
+  // Fallback cuối mới dùng DOM/execCommand. Có verify sau đó, không coi textContent là đủ để submit nếu verify không thấy.
   const domResult = await page.evaluate(({ text }) => {
     const el = document.activeElement;
     if (!el) return { ok: false, reason: 'no-active-element' };
@@ -3563,25 +3722,17 @@ async function insertPromptIntoFocusedComposer(page, jobId, prompt) {
     if (!isEditable || bad) return { ok: false, reason: `active-not-composer:${tag}:${type}` };
 
     const dispatchInput = (target, value) => {
-      try {
-        target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: value }));
-      } catch { }
-      try {
-        target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
-      } catch {
-        target.dispatchEvent(new Event('input', { bubbles: true }));
-      }
+      try { target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: value })); } catch { }
+      try { target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value })); } catch { target.dispatchEvent(new Event('input', { bubbles: true })); }
       target.dispatchEvent(new Event('change', { bubbles: true }));
     };
 
     if (tag === 'textarea' || tag === 'input') {
       const proto = tag === 'textarea' ? window.HTMLTextAreaElement?.prototype : window.HTMLInputElement?.prototype;
       const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
-      if (descriptor?.set) descriptor.set.call(el, '');
-      else el.value = '';
+      if (descriptor?.set) descriptor.set.call(el, ''); else el.value = '';
       dispatchInput(el, '');
-      if (descriptor?.set) descriptor.set.call(el, text);
-      else el.value = text;
+      if (descriptor?.set) descriptor.set.call(el, text); else el.value = text;
       dispatchInput(el, text);
       return { ok: true, method: `native-${tag}`, length: text.length };
     }
@@ -3598,28 +3749,17 @@ async function insertPromptIntoFocusedComposer(page, jobId, prompt) {
       el.textContent = text;
     }
     dispatchInput(el, text);
-
-    const current = String(el.innerText || el.textContent || '');
-    if (!current.includes(text.slice(0, Math.min(30, text.length)))) {
-      el.textContent = text;
-      dispatchInput(el, text);
-    }
-    return { ok: true, method: 'contenteditable-fast', length: text.length };
+    return { ok: true, method: 'contenteditable-execCommand', length: text.length };
   }, { text }).catch((error) => ({ ok: false, reason: error.message }));
 
-  if (domResult?.ok) {
-    await setStatus(jobId, 'SUBMITTING_PROMPT', `Đã nhập prompt nhanh bằng ${domResult.method}, ${domResult.length} ký tự.`).catch(() => null);
+  await page.waitForTimeout(Number(env.FLOW_AFTER_PROMPT_DELAY_MS || 700));
+  verification = await verifyLocal('after-dom-fallback');
+  if (domResult?.ok && verification?.ok) {
+    await setStatus(jobId, 'SUBMITTING_PROMPT', `Đã nhập prompt bằng ${domResult.method}, ${text.length} ký tự.`).catch(() => null);
     return domResult.method;
   }
 
-  await setStatus(jobId, 'SUBMITTING_PROMPT', `DOM paste chưa được (${domResult?.reason || 'unknown'}), dùng keyboard.insertText fallback.`).catch(() => null);
-  try {
-    await page.keyboard.insertText(text);
-    return 'keyboard-insertText';
-  } catch {
-    await page.keyboard.type(text, { delay: Number(env.FLOW_KEYBOARD_TYPE_DELAY_MS || 0) });
-    return 'keyboard-type-fallback';
-  }
+  throw new Error(`Không nhập được prompt vào composer Flow. DOM=${domResult?.reason || domResult?.method || 'unknown'} Verify=${verification?.reason || verification?.activeText || 'not-found'}`);
 }
 
 async function submitPromptAndCreateStrict(page, jobId, prompt) {
@@ -3628,14 +3768,14 @@ async function submitPromptAndCreateStrict(page, jobId, prompt) {
 
   // Luôn đóng panel setting/model trước khi nhập. Nếu không đóng được thì dừng,
   // tuyệt đối không click Create khi prompt chưa nằm trong composer thật.
-  await closeFlowSettingsPanel(page, jobId, { strict: true });
+  await closeFlowSettingsPanel(page, jobId, { strict: false });
 
   await clickRealFlowPromptBox(page, jobId);
 
   const panelOpenAfterClick = await isPanelStillOpen(page);
   if (panelOpenAfterClick) {
     await setStatus(jobId, 'SUBMITTING_PROMPT', 'Click ô prompt vô tình mở panel setting/model. Đóng panel và click lại prompt.').catch(() => null);
-    await closeFlowSettingsPanel(page, jobId, { strict: true });
+    await closeFlowSettingsPanel(page, jobId, { strict: false });
     await clickRealFlowPromptBox(page, jobId);
   }
 
@@ -3647,7 +3787,7 @@ async function submitPromptAndCreateStrict(page, jobId, prompt) {
   let verified = await verifyPromptVisibleInComposer(page, jobId, promptText, 'sau lần nhập thứ nhất');
   if (!verified) {
     await setStatus(jobId, 'SUBMITTING_PROMPT', 'Prompt chưa vào composer sau lần 1, worker thử focus và nhập lại lần 2.').catch(() => null);
-    await closeFlowSettingsPanel(page, jobId, { strict: true });
+    await closeFlowSettingsPanel(page, jobId, { strict: false });
     await clickRealFlowPromptBox(page, jobId);
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => null);
     await page.keyboard.press('Backspace').catch(() => null);
@@ -3663,30 +3803,44 @@ async function submitPromptAndCreateStrict(page, jobId, prompt) {
     throw new Error('Không xác nhận được prompt đã nằm trong ô Flow. Worker dừng, không bấm Create/Generate.');
   }
 
-  await closeFlowSettingsPanel(page, jobId, { strict: true });
-  await clickFlowCreateButton(page, jobId, promptText);
+  await closeFlowSettingsPanel(page, jobId, { strict: false });
+  try {
+    await clickFlowCreateButton(page, jobId, promptText);
+  } catch (error) {
+    const message = String(error?.message || error || '');
+    if (!/prompt|provided|required|thiếu prompt|chưa nằm trong ô Flow/i.test(message)) throw error;
+    await setStatus(jobId, 'SUBMITTING_PROMPT', `Flow vẫn báo thiếu prompt sau lần gửi đầu (${message}). Worker nhập lại bằng keyboard/paste và gửi lại một lần.`).catch(() => null);
+    await closeFlowSettingsPanel(page, jobId, { strict: false }).catch(() => null);
+    await clickRealFlowPromptBox(page, jobId);
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => null);
+    await page.keyboard.press('Backspace').catch(() => null);
+    await insertPromptIntoFocusedComposer(page, jobId, promptText);
+    const retryVerified = await verifyPromptVisibleInComposer(page, jobId, promptText, 'sau khi retry do Flow báo thiếu prompt');
+    if (!retryVerified) throw error;
+    await closeFlowSettingsPanel(page, jobId, { strict: false }).catch(() => null);
+    await clickFlowCreateButton(page, jobId, promptText);
+  }
 }
 
 
 async function getOrCreateBrowserContext() {
-  if (FLOW_KEEP_BROWSER_OPEN && CACHED_BROWSER_CONTEXT) {
+  const shouldReuseBrowser = FLOW_KEEP_BROWSER_OPEN && !FLOW_CLOSE_AFTER_JOB;
+  if (shouldReuseBrowser && CACHED_BROWSER_CONTEXT) {
     try {
-      const pages = CACHED_BROWSER_CONTEXT.pages();
-      if (pages.some((page) => !page.isClosed?.())) return CACHED_BROWSER_CONTEXT;
+      // Probe nhẹ để phát hiện trường hợp user đã tắt Chrome bằng tay.
+      CACHED_BROWSER_CONTEXT.pages();
+      return CACHED_BROWSER_CONTEXT;
     } catch {
       CACHED_BROWSER_CONTEXT = null;
     }
   }
 
   const context = await launchFlowBrowserContext(CHROME_PROFILE_DIR, 'windows-flow-worker');
+  context.on('close', () => {
+    if (CACHED_BROWSER_CONTEXT === context) CACHED_BROWSER_CONTEXT = null;
+  });
 
-  if (FLOW_KEEP_BROWSER_OPEN) {
-    CACHED_BROWSER_CONTEXT = context;
-    context.on('close', () => {
-      if (CACHED_BROWSER_CONTEXT === context) CACHED_BROWSER_CONTEXT = null;
-    });
-  }
-
+  if (shouldReuseBrowser) CACHED_BROWSER_CONTEXT = context;
   return context;
 }
 
@@ -3698,13 +3852,11 @@ async function automateWithPlaywright(job) {
 
   const context = await getOrCreateBrowserContext();
 
-  const page = context.pages()[0] || await context.newPage();
+  let page = null;
   const heartbeatTimer = setInterval(() => heartbeat(job.jobId, 'Worker vẫn đang thao tác Flow.'), HEARTBEAT_INTERVAL_MS);
 
   try {
-    await page.goto(FLOW_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
-    await page.waitForTimeout(Number(env.FLOW_AFTER_OPEN_DELAY_MS || 5000));
-    await enableCoordinateLogger(page).catch(() => null);
+    page = await openNewFlowPage(context, job.jobId, { closeExisting: true });
     await clickFlowStageButtons(page, job.jobId).catch(() => null);
 
     const inputPath = await downloadInputAsset(job);
@@ -3730,7 +3882,6 @@ async function automateWithPlaywright(job) {
 
     await clickFlowStageButtons(page, job.jobId).catch(() => null);
     await waitForFlowPromptOrManualLogin(page, job.jobId, promptSelectors);
-    await ensureFlowComposerReady(page, job.jobId, promptSelectors, newProjectSelectors);
 
     for (let i = 0; i < promptTasks.length; i += 1) {
       const { prompt } = promptTasks[i];
@@ -3741,12 +3892,13 @@ async function automateWithPlaywright(job) {
 
       await setStatus(job.jobId, 'CREATING_PROJECT', `Đang tạo ${outputLabel} ${i + 1}/${promptTasks.length} ...`);
 
-      if (i > 0) {
-        await clickFirst(page, newProjectSelectors, { required: false, timeout: 4500 }).catch(() => null);
-        await clickFlowStageButtons(page, job.jobId).catch(() => null);
-        await page.waitForTimeout(Number(env.FLOW_AFTER_NEW_PROJECT_DELAY_MS || 1800));
+      if (i > 0 && FLOW_NEW_PAGE_PER_PROMPT) {
+        await page.close({ runBeforeUnload: false }).catch(() => null);
+        page = await openNewFlowPage(context, job.jobId, { closeExisting: true });
+        await waitForFlowPromptOrManualLogin(page, job.jobId, promptSelectors);
       }
 
+      await forceFreshFlowProject(page, job.jobId, `${outputLabel} ${i + 1}/${promptTasks.length}`);
       await ensureFlowComposerReady(page, job.jobId, promptSelectors, newProjectSelectors);
 
       await setStatus(
@@ -3855,7 +4007,9 @@ async function automateWithPlaywright(job) {
         }
       }
 
-      await closeFlowSettingsPanel(page, job.jobId);
+      await closeFlowSettingsPanel(page, job.jobId, { strict: false });
+      await clickRealFlowPromptBox(page, job.jobId).catch(() => null);
+      await page.waitForTimeout(Number(env.FLOW_AFTER_CLOSE_PANEL_BUFFER_MS || 350));
 
       await waitWithTimeout(
         submitPromptAndCreateStrict(page, job.jobId, prompt),
@@ -3878,11 +4032,14 @@ async function automateWithPlaywright(job) {
 
     return downloadedFiles;
   } catch (error) {
-    await saveDebugArtifacts(page, job.jobId, 'flow-error');
+    if (page && !page.isClosed?.()) await saveDebugArtifacts(page, job.jobId, 'flow-error').catch(() => null);
     throw error;
   } finally {
     clearInterval(heartbeatTimer);
-    if (!FLOW_KEEP_BROWSER_OPEN) await context.close();
+    if (FLOW_CLOSE_AFTER_JOB || !FLOW_KEEP_BROWSER_OPEN) {
+      if (CACHED_BROWSER_CONTEXT === context) CACHED_BROWSER_CONTEXT = null;
+      await context.close().catch(() => null);
+    }
   }
 }
 
@@ -3954,6 +4111,10 @@ async function main() {
   console.log(`Chrome profile=${CHROME_PROFILE_DIR}`);
   console.log(`FLOW_LOGIN_WAIT_MS=${FLOW_LOGIN_WAIT_MS}`);
   console.log(`FLOW_KEEP_BROWSER_OPEN=${FLOW_KEEP_BROWSER_OPEN}`);
+  console.log(`FLOW_CLOSE_AFTER_JOB=${FLOW_CLOSE_AFTER_JOB}`);
+  console.log(`FLOW_FORCE_NEW_PROJECT_EACH_PROMPT=${FLOW_FORCE_NEW_PROJECT_EACH_PROMPT}`);
+  console.log(`FLOW_REQUIRE_FRESH_PROJECT=${FLOW_REQUIRE_FRESH_PROJECT}`);
+  console.log(`FLOW_NEW_PAGE_PER_PROMPT=${FLOW_NEW_PAGE_PER_PROMPT}`);
   console.log(`FLOW_FAST_SELECTOR_MODE=${FLOW_FAST_SELECTOR_MODE}`);
   console.log(`FLOW_FORCE_COORDINATES=${FLOW_FORCE_COORDINATES}`);
   console.log(`FLOW_COORDINATE_HELPER=${FLOW_COORDINATE_HELPER}`);

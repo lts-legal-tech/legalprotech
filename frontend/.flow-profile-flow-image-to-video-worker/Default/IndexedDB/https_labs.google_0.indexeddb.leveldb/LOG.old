@@ -1,0 +1,6 @@
+2026/05/06-16:35:53.336 4d54 Creating DB C:\Users\asus\Downloads\Compressed\legalprotech\legalprotech\frontend\.flow-profile-flow-image-to-video-worker\Default\IndexedDB\https_labs.google_0.indexeddb.leveldb since it was missing.
+2026/05/06-16:35:53.344 4d54 Reusing MANIFEST C:\Users\asus\Downloads\Compressed\legalprotech\legalprotech\frontend\.flow-profile-flow-image-to-video-worker\Default\IndexedDB\https_labs.google_0.indexeddb.leveldb/MANIFEST-000001
+2026/05/06-16:35:53.618 4d54 Level-0 table #5: started
+2026/05/06-16:35:53.631 4d54 Level-0 table #5: 1298 bytes OK
+2026/05/06-16:35:53.633 4d54 Delete type=0 #3
+2026/05/06-16:35:53.634 6430 Manual compaction at level-0 from '\x00\x01\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x02\x00\x00\x00' @ 0 : 0; will stop at (end)

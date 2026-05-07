@@ -122,6 +122,67 @@ function safeFileName(value, fallback = 'file') {
   return clean || fallback;
 }
 
+export function normalizeUserId(value) {
+  const clean = String(value || '').trim();
+  if (!clean) return '';
+  return clean.toLowerCase().replace(/[^a-z0-9@._:-]/g, '_');
+}
+
+export function getRequestUserId(request) {
+  if (!request) return '';
+  try {
+    const headerUser = request.headers?.get?.('x-user-id') || request.headers?.get?.('x-legalprotech-user-id') || '';
+    const urlUser = request.url ? new URL(request.url).searchParams.get('user_id') : '';
+    return normalizeUserId(headerUser || urlUser || '');
+  } catch {
+    return '';
+  }
+}
+
+export function getRequestAccess(request) {
+  if (!request) return { userId: '', token: '' };
+  try {
+    const url = request.url ? new URL(request.url) : null;
+    return {
+      userId: getRequestUserId(request),
+      token: String(request.headers?.get?.('x-flow-token') || url?.searchParams.get('token') || '').trim(),
+    };
+  } catch {
+    return { userId: getRequestUserId(request), token: '' };
+  }
+}
+
+export function userCanAccessFlowJob(job, { userId, token } = {}) {
+  if (!job) return false;
+  if (token && String(token) === String(job.token || '')) return true;
+  const requestedUserId = normalizeUserId(userId);
+  const jobUserId = normalizeUserId(job.userId || job.user_id || job.ownerId || job.owner_id || '');
+  return Boolean(requestedUserId && jobUserId && requestedUserId === jobUserId);
+}
+
+function appendQueryParam(url, key, value) {
+  if (!url || !value) return url || '';
+  const text = String(url);
+  if (!text.startsWith(PUBLIC_RESULT_PREFIX)) return text;
+  if (new RegExp(`([?&])${key}=`).test(text)) return text;
+  const joiner = text.includes('?') ? '&' : '?';
+  return `${text}${joiner}${key}=${encodeURIComponent(value)}`;
+}
+
+function scopeResultAccessUrl(url, job) {
+  if (!url) return '';
+  return appendQueryParam(String(url), 'token', job?.token || '');
+}
+
+function scopeResultsForJob(job, results = []) {
+  if (!Array.isArray(results)) return [];
+  return results.map((item) => ({
+    ...item,
+    url: scopeResultAccessUrl(item.url, job),
+    thumbnail: scopeResultAccessUrl(item.thumbnail, job),
+  }));
+}
+
 
 const MEDIA_TYPES = {
   '.mp4': 'video/mp4',
@@ -287,15 +348,21 @@ export async function recoverFlowJobFromSnapshot(jobId, snapshot = {}) {
 
   const now = nowIso();
   const token = snapshot.token || makeId('share');
+  const userId = normalizeUserId(snapshot.userId || snapshot.user_id || snapshot.ownerId || snapshot.owner_id || 'anonymous') || 'anonymous';
   const prompt = snapshot.prompt || (Array.isArray(snapshot.prompts) ? snapshot.prompts.join('\n') : '');
-  const prompts = Array.isArray(snapshot.prompts) && snapshot.prompts.length ? snapshot.prompts : splitPromptLines(prompt || snapshot.prompt || 'Recovered AutoFlow job');
+  const recoveredOutputType = snapshot.outputType || ((snapshot.tool === 'text-to-image' || snapshot.tool === 'my-product') ? 'image' : 'video');
+  const prompts = Array.isArray(snapshot.prompts) && snapshot.prompts.length
+    ? snapshot.prompts
+    : (recoveredOutputType === 'video' ? [String(prompt || snapshot.prompt || 'Recovered AutoFlow job').trim()].filter(Boolean) : splitPromptLines(prompt || snapshot.prompt || 'Recovered AutoFlow job'));
   const recovered = {
     jobId,
     token,
+    userId,
+    ownerId: userId,
     status: FLOW_STATUSES.FETCHING_RESULTS,
     message: 'Job được khôi phục tự động khi Worker trả kết quả. Có thể Next dev server đã reload trong lúc Flow đang chạy.',
     tool: snapshot.tool || 'image-to-video',
-    outputType: snapshot.outputType || ((snapshot.tool === 'text-to-image' || snapshot.tool === 'my-product') ? 'image' : 'video'),
+    outputType: recoveredOutputType,
     model: snapshot.model || 'flow',
     aspectRatio: snapshot.aspectRatio || '16:9',
     duration: Number(snapshot.duration || 8),
@@ -309,7 +376,7 @@ export async function recoverFlowJobFromSnapshot(jobId, snapshot = {}) {
     inputAsset: snapshot.inputAsset || null,
     endInputAsset: snapshot.endInputAsset || null,
     results: [],
-    zipUrl: snapshot.zipUrl || `/api/flow/jobs/${jobId}/download`,
+    zipUrl: snapshot.zipUrl || `/api/flow/jobs/${jobId}/download?user_id=${encodeURIComponent(userId)}`,
     shareUrl: snapshot.shareUrl || `/shared/${token}`,
     expiresAt: snapshot.expiresAt || futureIso(),
     workerType: snapshot.workerType || getFlowWorkerType(snapshot.tool || 'image-to-video'),
@@ -376,14 +443,19 @@ export async function createFlowJobFromFormData(formData) {
   await ensureDirs();
   const jobId = makeId('flow');
   const token = makeId('share');
+  const userId = normalizeUserId(formData.get('user_id') || formData.get('userId') || 'anonymous') || 'anonymous';
   const prompt = String(formData.get('prompt') || '');
-  const prompts = splitPromptLines(prompt);
-  if (!prompts.length) throw new Error('Thiếu prompt.');
-
   const tool = String(formData.get('tool') || 'image-to-video');
   const outputTypeRaw = String(formData.get('output_type') || formData.get('outputType') || '').toLowerCase();
   const outputType = outputTypeRaw || (tool === 'text-to-image' || tool === 'my-product' ? 'image' : 'video');
   const isVideoJob = outputType === 'video';
+  // Video prompt phải được giữ nguyên một khối. Không tách từng dòng thành nhiều prompt,
+  // vì prompt video thường có xuống dòng/shot list và sẽ làm Flow nhận lặp nhiều lần.
+  const prompts = isVideoJob
+    ? [prompt.trim()].filter(Boolean)
+    : splitPromptLines(prompt);
+  if (!prompts.length) throw new Error('Thiếu prompt.');
+
   const videosPerPromptRaw = Number(formData.get('videos_per_prompt') || formData.get('videosPerPrompt') || 1);
   const videosPerPrompt = isVideoJob ? Math.max(1, Math.min(videosPerPromptRaw || 1, 4)) : 1;
   const countPerPromptRaw = Number(formData.get('count_per_prompt') || formData.get('countPerPrompt') || 1);
@@ -409,6 +481,8 @@ export async function createFlowJobFromFormData(formData) {
   const job = {
     jobId,
     token,
+    userId,
+    ownerId: userId,
     status: FLOW_STATUSES.QUEUED,
     message: isVideoJob
       ? 'Đã nhận lệnh. Windows VPS Worker sẽ tự động lấy job và chạy Flow.'
@@ -429,7 +503,7 @@ export async function createFlowJobFromFormData(formData) {
     inputAsset,
     endInputAsset,
     results: [],
-    zipUrl: `/api/flow/jobs/${jobId}/download`,
+    zipUrl: `/api/flow/jobs/${jobId}/download?user_id=${encodeURIComponent(userId)}`,
     shareUrl: `/shared/${token}`,
     expiresAt: futureIso(),
     workerId: '',
@@ -589,6 +663,10 @@ export async function saveFlowResultFile({ jobId, file, bytes, originalName, mim
     originalName: originalName || file?.name || 'result.mp4',
     mimeType: mimeType || file?.type || '',
   });
+  if (String(job.outputType || '').toLowerCase() === 'video' && String(prepared.mimeType || '').startsWith('image/')) {
+    throw new Error(`Worker tải nhầm file ảnh (${prepared.originalName || 'image'}) cho job video. Bỏ qua kết quả cũ thay vì hiển thị sai.`);
+  }
+
   const name = `${Date.now()}-${safeFileName(prepared.originalName || 'result.mp4')}`;
   const dir = path.join(RESULT_DIR, jobId);
   await fs.mkdir(dir, { recursive: true });
@@ -601,20 +679,24 @@ export async function saveFlowResultFile({ jobId, file, bytes, originalName, mim
     mimeType: prepared.mimeType || contentTypeFromName(name, 'video/mp4'),
     prompt,
     promptIndex,
-    url: `${PUBLIC_RESULT_PREFIX}/${jobId}/${name}`,
+    url: `${PUBLIC_RESULT_PREFIX}/${jobId}/${name}?token=${encodeURIComponent(job.token || '')}`,
     duration,
     aspectRatio,
   });
 
   const currentResults = Array.isArray(job.results) ? job.results : [];
-  const nextStatus = complete ? FLOW_STATUSES.COMPLETED : FLOW_STATUSES.FETCHING_RESULTS;
+  const requestedLimit = Math.max(1, Number(job.requestedCount || 1));
+  if (currentResults.length >= requestedLimit) {
+    throw new Error(`Job đã đủ ${requestedLimit} kết quả, từ chối lưu thêm để tránh nhân đôi/trả nhầm result cũ.`);
+  }
+  const nextStatus = complete || currentResults.length + 1 >= requestedLimit ? FLOW_STATUSES.COMPLETED : FLOW_STATUSES.FETCHING_RESULTS;
   const patched = await patchFlowJob(jobId, (current) => ({
     status: nextStatus,
-    message: complete ? 'AutoFlow đã hoàn tất và trả kết quả về website.' : 'Worker đã gửi một kết quả về website.',
-    results: [...currentResults, result],
+    message: nextStatus === FLOW_STATUSES.COMPLETED ? 'AutoFlow đã hoàn tất và trả kết quả về website.' : 'Worker đã gửi một kết quả về website.',
+    results: [...currentResults, result].slice(0, requestedLimit),
     heartbeatAt: nowIso(),
-    completedAt: complete ? nowIso() : current.completedAt || '',
-    timeline: appendTimeline(current, nextStatus, complete ? 'Hoàn tất job.' : 'Đã nhận thêm kết quả.', { resultId: result.id }),
+    completedAt: nextStatus === FLOW_STATUSES.COMPLETED ? nowIso() : current.completedAt || '',
+    timeline: appendTimeline(current, nextStatus, nextStatus === FLOW_STATUSES.COMPLETED ? 'Hoàn tất job.' : 'Đã nhận thêm kết quả.', { resultId: result.id }),
   }));
 
   return { result, job: normalizeJob(patched) };
@@ -630,6 +712,8 @@ export async function appendFlowResultRecords(jobId, results = [], { complete = 
     promptIndex: item.promptIndex ?? index,
     prompt: item.prompt || job.prompts?.[item.promptIndex ?? index] || '',
     mimeType: item.mimeType || (item.type === 'image' ? 'image/png' : 'video/mp4'),
+    url: scopeResultAccessUrl(item.url, job),
+    thumbnail: scopeResultAccessUrl(item.thumbnail, job),
     duration: item.duration || job.duration || 8,
     aspectRatio: item.aspectRatio || job.aspectRatio || '16:9',
   }));
@@ -653,15 +737,20 @@ export async function getFlowResultsByToken(token) {
     success: true,
     token,
     jobId: job.jobId,
+    userId: job.userId || job.ownerId || '',
     expiresAt: job.expiresAt,
-    results: Array.isArray(job.results) ? job.results : [],
-    zipUrl: job.zipUrl,
+    results: scopeResultsForJob(job, job.results || []),
+    zipUrl: `/api/flow/jobs/${job.jobId}/download?token=${encodeURIComponent(job.token || '')}`,
   };
 }
 
-export async function applyFlowResultsAction({ token, jobId, action }) {
+export async function applyFlowResultsAction({ token, jobId, action, user_id, userId }) {
+  const accessUserId = normalizeUserId(user_id || userId || '');
   const job = jobId ? await readFlowJob(jobId) : (await listFlowJobs()).find((item) => item.token === token);
   if (!job) throw new Error('Không tìm thấy job/token.');
+  if (!userCanAccessFlowJob(job, { userId: accessUserId, token })) {
+    throw new Error('Không có quyền thao tác với kết quả của user khác.');
+  }
 
   if (action === 'delete_all') {
     const patched = await patchFlowJob(job.jobId, (current) => ({
@@ -687,10 +776,38 @@ export async function applyFlowResultsAction({ token, jobId, action }) {
   }
 
   if (action === 'save_all') {
-    return { success: true, message: 'Gói tải xuống đã sẵn sàng.', zipUrl: job.zipUrl || `/api/flow/jobs/${job.jobId}/download`, expiresAt: job.expiresAt };
+    return { success: true, message: 'Gói tải xuống đã sẵn sàng.', zipUrl: job.zipUrl || `/api/flow/jobs/${job.jobId}/download?token=${encodeURIComponent(job.token || '')}`, expiresAt: job.expiresAt };
   }
 
   throw new Error('Action không hợp lệ.');
+}
+
+
+export async function listFlowVideoLibraryForUser(userId) {
+  const scopeUserId = normalizeUserId(userId);
+  if (!scopeUserId) return { success: true, userId: '', items: [] };
+  const jobs = await listFlowJobs();
+  const items = [];
+  for (const job of jobs) {
+    const jobUserId = normalizeUserId(job.userId || job.user_id || job.ownerId || job.owner_id || '');
+    if (jobUserId !== scopeUserId) continue;
+    // Kho video chỉ lưu/hiển thị video. Ảnh vẫn có thể trả ở màn kết quả job ảnh, nhưng không đi vào kho này.
+    if (String(job.outputType || '').toLowerCase() !== 'video') continue;
+    for (const result of scopeResultsForJob(job, job.results || [])) {
+      if (String(result.type || '').toLowerCase() !== 'video') continue;
+      items.push({
+        ...result,
+        jobId: job.jobId,
+        token: job.token,
+        tool: job.tool,
+        jobStatus: job.status,
+        jobCreatedAt: job.createdAt,
+        jobCompletedAt: job.completedAt || '',
+      });
+    }
+  }
+  items.sort((a, b) => new Date(b.createdAt || b.jobCreatedAt || 0) - new Date(a.createdAt || a.jobCreatedAt || 0));
+  return { success: true, userId: scopeUserId, items };
 }
 
 export function normalizeJob(job) {
@@ -699,6 +816,7 @@ export function normalizeJob(job) {
     success: true,
     jobId: job.jobId,
     token: job.token,
+    userId: job.userId || job.ownerId || '',
     status: job.status,
     message: job.message,
     error: job.error || '',
@@ -716,9 +834,9 @@ export function normalizeJob(job) {
     prompts: job.prompts || [],
     inputAsset: job.inputAsset || null,
     endInputAsset: job.endInputAsset || null,
-    results: Array.isArray(job.results) ? job.results : [],
+    results: scopeResultsForJob(job, job.results || []),
     resultCount: Array.isArray(job.results) ? job.results.length : 0,
-    zipUrl: job.zipUrl || `/api/flow/jobs/${job.jobId}/download`,
+    zipUrl: job.zipUrl || `/api/flow/jobs/${job.jobId}/download?token=${encodeURIComponent(job.token || '')}`,
     shareUrl: job.shareUrl || `/shared/${job.token}`,
     expiresAt: job.expiresAt,
     workerId: job.workerId || '',
@@ -770,7 +888,8 @@ export async function buildFlowJobZip(jobId) {
   const files = [];
   for (const [index, result] of (job.results || []).entries()) {
     if (!result.url || !result.url.startsWith(PUBLIC_RESULT_PREFIX)) continue;
-    const relative = result.url.replace(PUBLIC_RESULT_PREFIX, '').replace(/^\//, '');
+    const cleanUrl = String(result.url || '').split('?')[0];
+    const relative = cleanUrl.replace(PUBLIC_RESULT_PREFIX, '').replace(/^\//, '');
     const diskPath = path.join(RESULT_DIR, relative);
     if (!fsSync.existsSync(diskPath)) continue;
     const ext = path.extname(diskPath) || (result.type === 'image' ? '.png' : '.mp4');

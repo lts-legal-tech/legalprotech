@@ -5,15 +5,16 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, LogOut, Shield, Trash2 } from 'lucide-react';
 import { AppIcon } from './icon';
 import { CHATBOT_PROJECT_SEED, TOOL_LIST } from '../lib/tools';
+import { getCurrentUserScope, scopedStorageKey } from '../lib/user-scope-client';
 
 const STORAGE_KEY = 'ai-workspace-projects';
 const PROFILE_KEY = 'legalprotech-current-profile';
 const ADMIN_KEY = 'legalprotech-admin-session';
 const PROJECT_EVENT = 'legalprotech:projects-updated';
 
-function readProjects() {
+function readProjects(userId = getCurrentUserScope().userId) {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(scopedStorageKey(STORAGE_KEY, userId));
     if (!raw) return CHATBOT_PROJECT_SEED;
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) && parsed.length ? parsed : CHATBOT_PROJECT_SEED;
@@ -54,22 +55,29 @@ export function Sidebar() {
   const [showAllProjects, setShowAllProjects] = useState(false);
 
   useEffect(() => {
-    setProjects(readProjects());
+    const currentUserId = getCurrentUserScope().userId || 'anonymous';
+    setProjects(readProjects(currentUserId));
     setProfile(readProfile());
     setAdmin(readAdmin());
     const sync = (event) => {
-      if (event?.detail && Array.isArray(event.detail)) {
-        setProjects(event.detail);
+      const nextUserId = getCurrentUserScope().userId || 'anonymous';
+      if (event?.detail?.userId && event.detail.userId !== nextUserId) return;
+      if (event?.detail?.projects && Array.isArray(event.detail.projects)) {
+        setProjects(event.detail.projects);
       } else {
-        setProjects(readProjects());
+        setProjects(readProjects(nextUserId));
       }
       setProfile(readProfile());
       setAdmin(readAdmin());
     };
     const syncStorage = (event) => {
-      if (event.key === STORAGE_KEY) setProjects(readProjects());
-      if (event.key === PROFILE_KEY) setProfile(readProfile());
-      if (event.key === ADMIN_KEY) setAdmin(readAdmin());
+      const nextUserId = getCurrentUserScope().userId || 'anonymous';
+      if (event.key === scopedStorageKey(STORAGE_KEY, nextUserId)) setProjects(readProjects(nextUserId));
+      if (event.key === PROFILE_KEY || event.key === ADMIN_KEY) {
+        setProfile(readProfile());
+        setAdmin(readAdmin());
+        setProjects(readProjects(getCurrentUserScope().userId || 'anonymous'));
+      }
     };
     window.addEventListener(PROJECT_EVENT, sync);
     window.addEventListener('storage', syncStorage);
@@ -89,8 +97,9 @@ export function Sidebar() {
     };
     const merged = [next, ...projects];
     setProjects(merged);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-    window.dispatchEvent(new CustomEvent(PROJECT_EVENT, { detail: merged }));
+    const currentUserId = getCurrentUserScope().userId || 'anonymous';
+    window.localStorage.setItem(scopedStorageKey(STORAGE_KEY, currentUserId), JSON.stringify(merged));
+    window.dispatchEvent(new CustomEvent(PROJECT_EVENT, { detail: { projects: merged, userId: currentUserId } }));
     router.push(`/chatbot?project=${next.id}`);
   }
 
@@ -98,8 +107,9 @@ export function Sidebar() {
     if (projects.length <= 1) return;
     const merged = projects.filter((item) => item.id !== id);
     setProjects(merged);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-    window.dispatchEvent(new CustomEvent(PROJECT_EVENT, { detail: merged }));
+    const currentUserId = getCurrentUserScope().userId || 'anonymous';
+    window.localStorage.setItem(scopedStorageKey(STORAGE_KEY, currentUserId), JSON.stringify(merged));
+    window.dispatchEvent(new CustomEvent(PROJECT_EVENT, { detail: { projects: merged, userId: currentUserId } }));
     if (selectedProject === id) {
       router.push(`/chatbot?project=${merged[0]?.id || ''}`);
     }
@@ -195,12 +205,13 @@ export function Sidebar() {
           {TOOL_LIST.map((tool) => {
             const href = `/tools/${tool.slug}`;
             const active = pathname === href;
+            const countLabel = typeof tool.expectedCount === 'number' ? `${tool.expectedCount} kết quả` : tool.expectedCount;
             return (
               <Link key={tool.slug} href={href} className={`flex items-center gap-3 rounded-2xl px-3 py-3 text-sm transition ${active ? 'bg-slate-900 text-white shadow-lg shadow-slate-200/40' : 'text-slate-700 hover:bg-slate-100'}`}>
                 <AppIcon name={tool.iconName} className="h-4 w-4" />
                 <div>
                   <div className="font-medium">{tool.label}</div>
-                  <div className={`text-xs ${active ? 'text-slate-300' : 'text-slate-400'}`}>{tool.expectedCount} kết quả</div>
+                  <div className={`text-xs ${active ? 'text-slate-300' : 'text-slate-400'}`}>{countLabel}</div>
                 </div>
               </Link>
             );

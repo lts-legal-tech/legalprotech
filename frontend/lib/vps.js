@@ -1,3 +1,5 @@
+import { appendUserToFormData, userRequestHeaders, getCurrentUserScope } from './user-scope-client';
+
 
 const MOCK_VIDEO = [
   'https://samplelib.com/lib/preview/mp4/sample-5s.mp4',
@@ -163,6 +165,7 @@ function makeResults(tool, count, promptLines = []) {
 }
 
 export async function createJob(formData) {
+  appendUserToFormData(formData);
   if (mock()) {
     const tool = String(formData.get('tool') || 'image-to-video');
     const promptLines = splitPromptLines(formData.get('prompt'));
@@ -188,7 +191,7 @@ export async function createJob(formData) {
     return { success: true, jobId, status: 'QUEUED', message: 'Mock VPS đã nhận job.' };
   }
   const target = `${ensureBase()}/jobs/create`;
-  const res = await fetch(target, { method: 'POST', headers: headers(), body: formData, cache: 'no-store' });
+  const res = await fetch(target, { method: 'POST', headers: { ...headers(), ...userRequestHeaders() }, body: formData, cache: 'no-store' });
   return normalizePayload(await parseResponse(res, 'Không tạo được job từ backend nội bộ.'));
 }
 
@@ -213,7 +216,7 @@ export async function getJobStatus(jobId) {
     });
   }
   const target = `${ensureBase()}/jobs/status?jobId=${encodeURIComponent(jobId)}`;
-  const res = await fetch(target, { headers: headers(), cache: 'no-store' });
+  const res = await fetch(target, { headers: { ...headers(), ...userRequestHeaders() }, cache: 'no-store' });
   return normalizePayload(await parseResponse(res, 'Không đọc được trạng thái job từ backend nội bộ.'));
 }
 
@@ -223,7 +226,7 @@ export async function getResultsByToken(token) {
     return rec || { error: 'Token không tồn tại.' };
   }
   const target = `${ensureBase()}/results/${token}`;
-  const res = await fetch(target, { headers: headers(), cache: 'no-store' });
+  const res = await fetch(target, { headers: { ...headers(), ...userRequestHeaders() }, cache: 'no-store' });
   return normalizePayload(await parseResponse(res, 'Không lấy được batch kết quả từ backend nội bộ.'));
 }
 
@@ -249,7 +252,7 @@ export async function postResultsAction(payload) {
   const res = await fetch(target, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers() },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...(payload || {}), user_id: getCurrentUserScope().userId }),
     cache: 'no-store',
   });
   return normalizePayload(await parseResponse(res, 'Không gửi được action tới backend nội bộ.'));

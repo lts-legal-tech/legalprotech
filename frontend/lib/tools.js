@@ -75,12 +75,12 @@ export const TOOL_LIST = [
   },
   {
     slug: 'my-product',
-    label: 'My Product',
-    shortLabel: 'Ảnh và video cho sản phẩm của tôi',
-    inputMode: 'image+text',
-    outputType: 'image',
+    label: 'Kho video',
+    shortLabel: 'Kho lưu video của tôi',
+    inputMode: 'library',
+    outputType: 'video',
     description:
-      'Tải ảnh sản phẩm, chọn hướng triển khai rồi tạo bộ visual thương mại phục vụ listing, social, ads hoặc shot studio. Route này đóng vai trò workspace sản phẩm tổng hợp.',
+      'Lưu và hiển thị video đã tạo theo từng user_id. Mỗi tài khoản chỉ thấy đúng video thuộc job của chính tài khoản đó.',
     defaults: {
       prompt:
         'Clean studio setup, soft white light, polished commercial e-commerce aesthetic, premium ad-ready background.',
@@ -92,7 +92,7 @@ export const TOOL_LIST = [
       { id: 'gemini-3.1-flash-image-preview', label: 'Google Image Fast' },
       { id: 'imagen-4', label: 'Imagen 4' },
     ],
-    expectedCount: 4,
+    expectedCount: 'riêng tư',
     iconName: 'box',
   },
 ];

@@ -120,7 +120,13 @@ export function ToolWorkspace({ tool }) {
   const isFlowImage = usesFlow && !isVideo;
   const maxVideoCount = profile?.entitlements?.maxVideoCount || tool.expectedCount || 10;
   const maxImagePromptCount = 4;
-  const promptLines = useMemo(() => splitPromptLines(prompt), [prompt]);
+  const promptLines = useMemo(() => {
+    const trimmed = String(prompt || '').trim();
+    // Video prompt được giữ nguyên một khối, kể cả có xuống dòng/shot list.
+    // Chỉ tool ảnh mới tách mỗi dòng thành một prompt riêng.
+    if (tool.outputType === 'video') return trimmed ? [trimmed] : [];
+    return splitPromptLines(prompt);
+  }, [prompt, tool.outputType]);
   const promptCount = promptLines.length;
   const videosPerPromptNumber = clampNumber(videosPerPrompt || 1, 1, 4, 1);
   const imagePerPromptNumber = clampNumber(count || 1, 1, 4, 1);
@@ -217,7 +223,7 @@ export function ToolWorkspace({ tool }) {
     setExpiresAt('');
     setJobId('');
 
-    const promptPayload = promptLines.join('\n');
+    const promptPayload = isVideo ? String(prompt || '').trim() : promptLines.join('\n');
     await copyText(promptPayload).then(() => setCopiedPrompt(true)).catch(() => setCopiedPrompt(false));
 
     try {
@@ -368,12 +374,12 @@ export function ToolWorkspace({ tool }) {
             <div className="mb-2 flex items-center justify-between gap-3 text-sm text-slate-700">
               <span>Prompt</span>
               <span className="text-xs text-slate-500">
-                {isVideo ? `${promptCount} prompt × ${videosPerPromptNumber} video = ${expectedFlowTotal}/${maxVideoCount} video` : `${promptCount} prompt × ${imagePerPromptNumber} ảnh = ${expectedFlowTotal}/${maxImagePromptCount} ảnh`}
+                {isVideo ? `1 prompt × ${videosPerPromptNumber} video = ${expectedFlowTotal}/${maxVideoCount} video` : `${promptCount} prompt × ${imagePerPromptNumber} ảnh = ${expectedFlowTotal}/${maxImagePromptCount} ảnh`}
               </span>
             </div>
             <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} className="input-light min-h-40 resize-none" />
             <div className="mt-2 flex flex-wrap items-center gap-3 text-xs leading-6 text-slate-500">
-              <span>{isVideo ? 'Mỗi dòng là 1 prompt. Có thể chọn 1–4 video cho mỗi prompt.' : `Mỗi dòng là 1 prompt. Flow sẽ chọn đúng x${imagePerPromptNumber} trên web cho mỗi dòng, tối đa ${maxImagePromptCount} ảnh/lần.`}</span>
+              <span>{isVideo ? 'Video: toàn bộ nội dung trong ô này được gửi thành 1 prompt duy nhất, kể cả có xuống dòng. Không tự nhân prompt theo từng dòng.' : `Mỗi dòng là 1 prompt. Flow sẽ chọn đúng x${imagePerPromptNumber} trên web cho mỗi dòng, tối đa ${maxImagePromptCount} ảnh/lần.`}</span>
               <button type="button" onClick={() => copyText(promptLines.join('\n')).then(() => setCopiedPrompt(true))} className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-700">
                 <Copy className="h-3 w-3" /> Copy prompt
               </button>
@@ -447,7 +453,7 @@ export function ToolWorkspace({ tool }) {
                 </div>
                 <div>
                   <div className="mb-2 text-sm text-slate-700">Tổng video dự kiến</div>
-                  <div className="input-light flex items-center">{promptCount || 0} prompt × {videosPerPromptNumber} video = {expectedFlowTotal}/{maxVideoCount} video</div>
+                  <div className="input-light flex items-center">1 prompt × {videosPerPromptNumber} video = {expectedFlowTotal}/{maxVideoCount} video</div>
                   <div className="mt-1 text-xs text-slate-500">Ảnh điểm cuối là tuỳ chọn. Nếu có, Worker sẽ cố upload thêm End frame.</div>
                 </div>
               </>
@@ -459,7 +465,7 @@ export function ToolWorkspace({ tool }) {
                 </div>
                 <div>
                   <div className="mb-2 text-sm text-slate-700">Tổng video dự kiến</div>
-                  <div className="input-light flex items-center">{promptCount || 0} prompt × {videosPerPromptNumber} video = {expectedFlowTotal}/{maxVideoCount} video</div>
+                  <div className="input-light flex items-center">1 prompt × {videosPerPromptNumber} video = {expectedFlowTotal}/{maxVideoCount} video</div>
                 </div>
               </>
             ) : isFlowImage ? (

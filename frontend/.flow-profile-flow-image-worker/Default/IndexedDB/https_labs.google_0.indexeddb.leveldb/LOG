@@ -1,0 +1,13 @@
+2026/05/06-18:47:47.873 18b4 Reusing MANIFEST C:\Users\asus\Downloads\Compressed\legalprotech\legalprotech\frontend\.flow-profile-flow-image-worker\Default\IndexedDB\https_labs.google_0.indexeddb.leveldb/MANIFEST-000001
+2026/05/06-18:47:47.874 18b4 Recovering log #6
+2026/05/06-18:47:47.874 18b4 Reusing old log C:\Users\asus\Downloads\Compressed\legalprotech\legalprotech\frontend\.flow-profile-flow-image-worker\Default\IndexedDB\https_labs.google_0.indexeddb.leveldb/000006.log 
+2026/05/06-18:47:47.902 5aa4 Level-0 table #10: started
+2026/05/06-18:47:47.918 5aa4 Level-0 table #10: 1186 bytes OK
+2026/05/06-18:47:47.921 5aa4 Delete type=0 #6
+2026/05/06-18:47:47.922 4fa8 Manual compaction at level-0 from '\x00\x06\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x07\x00\x00\x00' @ 0 : 0; will stop at '\x00\x06\x00\x00\x05' @ 381 : 1
+2026/05/06-18:47:47.923 4fa8 Compacting 1@0 + 1@1 files
+2026/05/06-18:47:47.945 4fa8 Generated table #11@0: 146 keys, 3336 bytes
+2026/05/06-18:47:47.945 4fa8 Compacted 1@0 + 1@1 files => 3336 bytes
+2026/05/06-18:47:47.947 4fa8 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/05/06-18:47:47.948 4fa8 Delete type=2 #10
+2026/05/06-18:47:47.949 4fa8 Manual compaction at level-0 from '\x00\x06\x00\x00\x05' @ 381 : 1 .. '\x00\x07\x00\x00\x00' @ 0 : 0; will stop at (end)

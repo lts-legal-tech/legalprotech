@@ -23,7 +23,7 @@ export function Dashboard() {
           </h1>
           <p className="mt-4 max-w-3xl text-sm leading-7 text-slate-600 md:text-base">
             Chatbot đứng đầu để tạo prompt và kịch bản. Sau đó chuyển nhanh sang text to image,
-            image to video hoặc my product để sản xuất nội dung thật qua VPS.
+            image to video; phần Kho video dùng để xem lại kết quả đã tạo theo từng user_id.
           </p>
           <div className="mt-6">
             <Link href="/chatbot" className="btn-primary">
@@ -59,7 +59,7 @@ export function Dashboard() {
                 <AppIcon name={tool.iconName} className="h-5 w-5" />
               </div>
               <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-500">
-                {tool.expectedCount} outputs
+                {typeof tool.expectedCount === 'number' ? `${tool.expectedCount} outputs` : tool.expectedCount}
               </div>
             </div>
             <div className="mt-5 text-xl font-semibold text-slate-900">{tool.shortLabel}</div>

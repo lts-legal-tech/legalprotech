@@ -1,0 +1,7 @@
+2026/05/06-16:36:08.117 4e7c Reusing MANIFEST C:\Users\asus\Downloads\Compressed\legalprotech\legalprotech\frontend\.flow-profile-flow-image-to-video-worker\Default\IndexedDB\https_labs.google_0.indexeddb.leveldb/MANIFEST-000001
+2026/05/06-16:36:08.117 4e7c Recovering log #4
+2026/05/06-16:36:08.118 4e7c Reusing old log C:\Users\asus\Downloads\Compressed\legalprotech\legalprotech\frontend\.flow-profile-flow-image-to-video-worker\Default\IndexedDB\https_labs.google_0.indexeddb.leveldb/000004.log 
+2026/05/06-16:36:08.435 38d0 Level-0 table #8: started
+2026/05/06-16:36:08.443 38d0 Level-0 table #8: 8304 bytes OK
+2026/05/06-16:36:08.446 38d0 Delete type=0 #4
+2026/05/06-16:36:08.447 3f0c Manual compaction at level-0 from '\x00\x05\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x06\x00\x00\x00' @ 0 : 0; will stop at (end)
