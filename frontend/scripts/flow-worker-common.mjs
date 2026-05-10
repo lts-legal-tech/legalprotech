@@ -107,8 +107,8 @@ function isDownloadCompatibleWithOutput(download, outputType = '') {
       : true;
   }
   if (type === 'video') {
-    // Flow often downloads video results as download.zip. Accept ZIP for video;
-    // the Next result API extracts the first media file before saving it to the web library.
+    // Flow often downloads result bundles as download.zip. Accept ZIP for video;
+    // the Next result API now extracts every media file in the ZIP and saves unique results.
     if (ZIP_EXT_RE.test(name)) {
       return String(process.env.FLOW_ACCEPT_VIDEO_ZIP_DOWNLOAD || 'true').toLowerCase() !== 'false';
     }
@@ -2843,16 +2843,22 @@ export class FlowWorker {
         await debugStep(promptPage, job, '13-after-submit-generate', { submitted });
         if (!submitted) throw new Error('Không bấm được nút Generate trên Flow.');
 
-        const remainingForJob = Math.max(0, Number(job.requestedCount || 1) - uploadedCount);
+        const requestedTotal = Number(job.requestedCount || 1);
+        const remainingForJob = Math.max(0, requestedTotal - uploadedCount);
         const expectedForPrompt = Math.max(1, Math.min(multiplierForJob(job), remainingForJob || 1));
+        const promptTargetCount = Math.min(requestedTotal, uploadedCount + expectedForPrompt);
         const downloadState = {};
-        for (let i = 0; i < expectedForPrompt; i += 1) {
-          await this.setStatus(job.jobId, 'GENERATING', `Flow đang generate kết quả ${uploadedCount + 1}/${job.requestedCount}.`);
+        for (let i = 0; uploadedCount < promptTargetCount && i < expectedForPrompt; i += 1) {
+          const beforeUploadCount = uploadedCount;
+          await this.setStatus(job.jobId, 'GENERATING', `Flow đang generate kết quả ${uploadedCount + 1}/${requestedTotal}.`);
           const download = await waitForResultSurface(promptPage, downloadState, { outputType: job.outputType, scanDirs: [workerTempRoot, FLOW_DOWNLOAD_DIR] });
           const saved = await saveDownload(download, workerTempRoot, uploadedCount);
-          uploadedCount += 1;
-          await this.setStatus(job.jobId, 'FETCHING_RESULTS', `Đang gửi kết quả ${uploadedCount}/${job.requestedCount} về website.`);
-          await this.uploadResult(job, saved, uploadedCount - 1, uploadedCount >= Number(job.requestedCount || 1));
+          await this.setStatus(job.jobId, 'FETCHING_RESULTS', `Đang gửi file kết quả ${beforeUploadCount + 1}/${requestedTotal} về website.`);
+          const uploadResponse = await this.uploadResult(job, saved, beforeUploadCount, false);
+          const serverResultCount = Number(uploadResponse?.resultCount || (Array.isArray(uploadResponse?.results) ? uploadResponse.results.length : 0));
+          const savedCount = Math.max(1, Number(uploadResponse?.savedCount || (Array.isArray(uploadResponse?.uploadedResults) ? uploadResponse.uploadedResults.length : 1)));
+          uploadedCount = Math.min(requestedTotal, Math.max(beforeUploadCount + savedCount, serverResultCount || beforeUploadCount + 1));
+          await this.setStatus(job.jobId, uploadedCount >= requestedTotal ? 'COMPLETED' : 'FETCHING_RESULTS', `Website đã nhận ${uploadedCount}/${requestedTotal} kết quả.`);
           await sleep(500);
         }
       }

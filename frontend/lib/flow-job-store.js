@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
 import zlib from 'zlib';
+import crypto from 'node:crypto';
 
 const STORE_ROOT = process.env.FLOW_JOB_STORE_DIR
   ? path.resolve(process.env.FLOW_JOB_STORE_DIR)
@@ -213,7 +214,8 @@ function isZipBuffer(buffer) {
   return Buffer.isBuffer(buffer) && buffer.length >= 4 && buffer.readUInt32LE(0) === 0x04034b50;
 }
 
-function extractFirstMediaFromZipBuffer(zipBuffer) {
+function extractMediaFromZipBuffer(zipBuffer) {
+  const entries = [];
   let offset = 0;
   while (offset + 30 <= zipBuffer.length) {
     const signature = zipBuffer.readUInt32LE(offset);
@@ -248,36 +250,27 @@ function extractFirstMediaFromZipBuffer(zipBuffer) {
       if (compressionMethod !== 0 && compressionMethod !== 8) {
         throw new Error(`File media trong ZIP dùng compression method chưa hỗ trợ: ${compressionMethod}`);
       }
-      if (!data.length) throw new Error('File media trong ZIP rỗng.');
-      return {
-        fileName: safeFileName(fileName, `result${ext}`),
-        bytes: data,
-        mimeType: contentTypeFromName(fileName),
-      };
+      if (data.length) {
+        entries.push({
+          fileName: safeFileName(fileName, `result${ext}`),
+          bytes: data,
+          mimeType: contentTypeFromName(fileName),
+        });
+      }
     }
 
-    // Nếu ZIP dùng data descriptor, local header có thể không có size chuẩn.
-    // Trường hợp này yêu cầu dùng nút download thật hoặc để worker tải lại candidate khác.
+    // ZIP dùng data descriptor có thể không ghi size ở local header.
+    // Khi đó dừng lại để tránh đọc sai file/stale result.
     if ((generalPurposeFlag & 0x08) && compressedSize === 0) break;
-    offset = dataEnd;
+    offset = Math.max(dataEnd, offset + 30 + fileNameLength + extraLength);
   }
-  return null;
+  return entries;
 }
 
-function normalizeResultFilePayload({ bytes, originalName, mimeType }) {
+function normalizeSingleResultFilePayload({ bytes, originalName, mimeType }) {
   let resultBytes = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
   let resultName = safeFileName(originalName || 'result.mp4', 'result.mp4');
   let resultMimeType = mimeType || contentTypeFromName(resultName, 'video/mp4');
-
-  if (isZipBuffer(resultBytes) || path.extname(resultName).toLowerCase() === '.zip') {
-    const extracted = extractFirstMediaFromZipBuffer(resultBytes);
-    if (!extracted) {
-      throw new Error('Worker tải nhầm file ZIP nhưng không tìm thấy video/ảnh bên trong ZIP. Hãy kiểm tra lại nút Download trên Flow.');
-    }
-    resultBytes = extracted.bytes;
-    resultName = extracted.fileName;
-    resultMimeType = extracted.mimeType;
-  }
 
   const ext = path.extname(resultName).toLowerCase();
   if (!MEDIA_TYPES[ext]) {
@@ -290,6 +283,29 @@ function normalizeResultFilePayload({ bytes, originalName, mimeType }) {
   }
 
   return { bytes: resultBytes, originalName: resultName, mimeType: resultMimeType };
+}
+
+function normalizeResultFilePayloads({ bytes, originalName, mimeType }) {
+  const resultBytes = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
+  const resultName = safeFileName(originalName || 'result.mp4', 'result.mp4');
+
+  if (isZipBuffer(resultBytes) || path.extname(resultName).toLowerCase() === '.zip') {
+    const extracted = extractMediaFromZipBuffer(resultBytes);
+    if (!extracted.length) {
+      throw new Error('Worker tải nhầm file ZIP nhưng không tìm thấy video/ảnh bên trong ZIP. Hãy kiểm tra lại nút Download trên Flow.');
+    }
+    return extracted.map((item) => normalizeSingleResultFilePayload({
+      bytes: item.bytes,
+      originalName: item.fileName,
+      mimeType: item.mimeType,
+    }));
+  }
+
+  return [normalizeSingleResultFilePayload({ bytes: resultBytes, originalName: resultName, mimeType })];
+}
+
+function contentHashForBytes(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
 }
 
 function shortTitle(value, fallback) {
@@ -633,7 +649,7 @@ export async function failFlowJob(jobId, { error, message, workerId } = {}) {
   return normalizeJob(patched);
 }
 
-function normalizeResultInput({ jobId, originalName, mimeType, prompt, promptIndex, url, thumbnail, duration, aspectRatio, sizeLabel }) {
+function normalizeResultInput({ jobId, originalName, mimeType, prompt, promptIndex, url, thumbnail, duration, aspectRatio, sizeLabel, contentHash, size }) {
   const isImage = mimeType?.startsWith?.('image/') || String(url || '').match(/\.(png|jpg|jpeg|webp|gif)(\?|$)/i);
   return {
     id: makeId('res'),
@@ -647,6 +663,8 @@ function normalizeResultInput({ jobId, originalName, mimeType, prompt, promptInd
     aspectRatio: aspectRatio || '16:9',
     sizeLabel: sizeLabel || (isImage ? 'HD' : '1080p'),
     originalName: originalName || '',
+    contentHash: contentHash || '',
+    size: Number(size || 0),
     createdAt: nowIso(),
   };
 }
@@ -658,30 +676,10 @@ export async function saveFlowResultFile({ jobId, file, bytes, originalName, mim
   if (!job) throw new Error('Không tìm thấy job.');
 
   const rawBytes = bytes || Buffer.from(await file.arrayBuffer());
-  const prepared = normalizeResultFilePayload({
+  const preparedItems = normalizeResultFilePayloads({
     bytes: rawBytes,
     originalName: originalName || file?.name || 'result.mp4',
     mimeType: mimeType || file?.type || '',
-  });
-  if (String(job.outputType || '').toLowerCase() === 'video' && String(prepared.mimeType || '').startsWith('image/')) {
-    throw new Error(`Worker tải nhầm file ảnh (${prepared.originalName || 'image'}) cho job video. Bỏ qua kết quả cũ thay vì hiển thị sai.`);
-  }
-
-  const name = `${Date.now()}-${safeFileName(prepared.originalName || 'result.mp4')}`;
-  const dir = path.join(RESULT_DIR, jobId);
-  await fs.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, name);
-  await fs.writeFile(filePath, prepared.bytes);
-
-  const result = normalizeResultInput({
-    jobId,
-    originalName: prepared.originalName || name,
-    mimeType: prepared.mimeType || contentTypeFromName(name, 'video/mp4'),
-    prompt,
-    promptIndex,
-    url: `${PUBLIC_RESULT_PREFIX}/${jobId}/${name}?token=${encodeURIComponent(job.token || '')}`,
-    duration,
-    aspectRatio,
   });
 
   const currentResults = Array.isArray(job.results) ? job.results : [];
@@ -689,17 +687,63 @@ export async function saveFlowResultFile({ jobId, file, bytes, originalName, mim
   if (currentResults.length >= requestedLimit) {
     throw new Error(`Job đã đủ ${requestedLimit} kết quả, từ chối lưu thêm để tránh nhân đôi/trả nhầm result cũ.`);
   }
-  const nextStatus = complete || currentResults.length + 1 >= requestedLimit ? FLOW_STATUSES.COMPLETED : FLOW_STATUSES.FETCHING_RESULTS;
+
+  const dir = path.join(RESULT_DIR, jobId);
+  await fs.mkdir(dir, { recursive: true });
+
+  const existingHashes = new Set(currentResults.map((item) => String(item.contentHash || '')).filter(Boolean));
+  const savedResults = [];
+  const seenInThisUpload = new Set();
+
+  for (const prepared of preparedItems) {
+    if (savedResults.length + currentResults.length >= requestedLimit) break;
+    if (String(job.outputType || '').toLowerCase() === 'video' && String(prepared.mimeType || '').startsWith('image/')) {
+      throw new Error(`Worker tải nhầm file ảnh (${prepared.originalName || 'image'}) cho job video. Bỏ qua kết quả cũ thay vì hiển thị sai.`);
+    }
+
+    const hash = contentHashForBytes(prepared.bytes);
+    if (existingHashes.has(hash) || seenInThisUpload.has(hash)) {
+      continue;
+    }
+    seenInThisUpload.add(hash);
+
+    const ordinal = currentResults.length + savedResults.length + 1;
+    const name = `${Date.now()}-${String(ordinal).padStart(2, '0')}-${safeFileName(prepared.originalName || 'result.mp4')}`;
+    const filePath = path.join(dir, name);
+    await fs.writeFile(filePath, prepared.bytes);
+
+    savedResults.push(normalizeResultInput({
+      jobId,
+      originalName: prepared.originalName || name,
+      mimeType: prepared.mimeType || contentTypeFromName(name, 'video/mp4'),
+      prompt,
+      promptIndex,
+      url: `${PUBLIC_RESULT_PREFIX}/${jobId}/${name}?token=${encodeURIComponent(job.token || '')}`,
+      duration,
+      aspectRatio,
+      contentHash: hash,
+      size: prepared.bytes.length,
+    }));
+  }
+
+  if (!savedResults.length) {
+    throw new Error('Không lưu thêm kết quả nào: file bị trùng nội dung hoặc không còn slot kết quả cho job này.');
+  }
+
+  const finalCount = currentResults.length + savedResults.length;
+  const nextStatus = complete || finalCount >= requestedLimit ? FLOW_STATUSES.COMPLETED : FLOW_STATUSES.FETCHING_RESULTS;
   const patched = await patchFlowJob(jobId, (current) => ({
     status: nextStatus,
-    message: nextStatus === FLOW_STATUSES.COMPLETED ? 'AutoFlow đã hoàn tất và trả kết quả về website.' : 'Worker đã gửi một kết quả về website.',
-    results: [...currentResults, result].slice(0, requestedLimit),
+    message: nextStatus === FLOW_STATUSES.COMPLETED
+      ? `AutoFlow đã hoàn tất và trả đủ ${Math.min(finalCount, requestedLimit)}/${requestedLimit} kết quả về website.`
+      : `Worker đã gửi ${Math.min(finalCount, requestedLimit)}/${requestedLimit} kết quả về website.`,
+    results: [...currentResults, ...savedResults].slice(0, requestedLimit),
     heartbeatAt: nowIso(),
     completedAt: nextStatus === FLOW_STATUSES.COMPLETED ? nowIso() : current.completedAt || '',
-    timeline: appendTimeline(current, nextStatus, nextStatus === FLOW_STATUSES.COMPLETED ? 'Hoàn tất job.' : 'Đã nhận thêm kết quả.', { resultId: result.id }),
+    timeline: appendTimeline(current, nextStatus, nextStatus === FLOW_STATUSES.COMPLETED ? 'Hoàn tất job.' : `Đã nhận thêm ${savedResults.length} kết quả.`, { resultId: savedResults[0].id, resultIds: savedResults.map((item) => item.id) }),
   }));
 
-  return { result, job: normalizeJob(patched) };
+  return { result: savedResults[0], results: savedResults, savedCount: savedResults.length, job: normalizeJob(patched) };
 }
 
 export async function appendFlowResultRecords(jobId, results = [], { complete = false, message, jobSnapshot } = {}) {
@@ -717,14 +761,28 @@ export async function appendFlowResultRecords(jobId, results = [], { complete = 
     duration: item.duration || job.duration || 8,
     aspectRatio: item.aspectRatio || job.aspectRatio || '16:9',
   }));
-  const patched = await patchFlowJob(jobId, (current) => ({
-    status: complete ? FLOW_STATUSES.COMPLETED : FLOW_STATUSES.FETCHING_RESULTS,
-    message: message || (complete ? 'AutoFlow đã hoàn tất và trả kết quả về website.' : 'Worker đã cập nhật kết quả.'),
-    results: [...(current.results || []), ...normalized],
-    heartbeatAt: nowIso(),
-    completedAt: complete ? nowIso() : current.completedAt || '',
-    timeline: appendTimeline(current, complete ? FLOW_STATUSES.COMPLETED : FLOW_STATUSES.FETCHING_RESULTS, message || 'Worker đã cập nhật kết quả.'),
-  }));
+  const patched = await patchFlowJob(jobId, (current) => {
+    const requestedLimit = Math.max(1, Number(current.requestedCount || job.requestedCount || 1));
+    const existing = Array.isArray(current.results) ? current.results : [];
+    const existingKeys = new Set(existing.map((item) => String(item.contentHash || item.url || item.originalName || '')).filter(Boolean));
+    const nextResults = [...existing];
+    for (const item of normalized) {
+      if (nextResults.length >= requestedLimit) break;
+      const key = String(item.contentHash || item.url || item.originalName || '');
+      if (key && existingKeys.has(key)) continue;
+      if (key) existingKeys.add(key);
+      nextResults.push(item);
+    }
+    const done = complete || nextResults.length >= requestedLimit;
+    return {
+      status: done ? FLOW_STATUSES.COMPLETED : FLOW_STATUSES.FETCHING_RESULTS,
+      message: message || (done ? `AutoFlow đã hoàn tất và trả đủ ${nextResults.length}/${requestedLimit} kết quả về website.` : `Worker đã cập nhật ${nextResults.length}/${requestedLimit} kết quả.`),
+      results: nextResults,
+      heartbeatAt: nowIso(),
+      completedAt: done ? nowIso() : current.completedAt || '',
+      timeline: appendTimeline(current, done ? FLOW_STATUSES.COMPLETED : FLOW_STATUSES.FETCHING_RESULTS, message || 'Worker đã cập nhật kết quả.'),
+    };
+  });
   return normalizeJob(patched);
 }
 
@@ -785,21 +843,21 @@ export async function applyFlowResultsAction({ token, jobId, action, user_id, us
 
 export async function listFlowVideoLibraryForUser(userId) {
   const scopeUserId = normalizeUserId(userId);
-  if (!scopeUserId) return { success: true, userId: '', items: [] };
+  if (!scopeUserId) return { success: true, userId: '', items: [], videoCount: 0, imageCount: 0 };
   const jobs = await listFlowJobs();
   const items = [];
   for (const job of jobs) {
     const jobUserId = normalizeUserId(job.userId || job.user_id || job.ownerId || job.owner_id || '');
     if (jobUserId !== scopeUserId) continue;
-    // Kho video chỉ lưu/hiển thị video. Ảnh vẫn có thể trả ở màn kết quả job ảnh, nhưng không đi vào kho này.
-    if (String(job.outputType || '').toLowerCase() !== 'video') continue;
     for (const result of scopeResultsForJob(job, job.results || [])) {
-      if (String(result.type || '').toLowerCase() !== 'video') continue;
+      const resultType = String(result.type || '').toLowerCase();
+      if (!['video', 'image'].includes(resultType)) continue;
       items.push({
         ...result,
         jobId: job.jobId,
         token: job.token,
         tool: job.tool,
+        outputType: job.outputType || resultType,
         jobStatus: job.status,
         jobCreatedAt: job.createdAt,
         jobCompletedAt: job.completedAt || '',
@@ -807,7 +865,13 @@ export async function listFlowVideoLibraryForUser(userId) {
     }
   }
   items.sort((a, b) => new Date(b.createdAt || b.jobCreatedAt || 0) - new Date(a.createdAt || a.jobCreatedAt || 0));
-  return { success: true, userId: scopeUserId, items };
+  return {
+    success: true,
+    userId: scopeUserId,
+    items,
+    videoCount: items.filter((item) => item.type === 'video').length,
+    imageCount: items.filter((item) => item.type === 'image').length,
+  };
 }
 
 export function normalizeJob(job) {

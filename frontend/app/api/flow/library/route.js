@@ -13,6 +13,6 @@ export async function GET(request) {
     const data = await listFlowVideoLibraryForUser(userId);
     return NextResponse.json(data);
   } catch (error) {
-    return NextResponse.json({ success: false, error: error.message || 'Không tải được kho video.' }, { status: 400 });
+    return NextResponse.json({ success: false, error: error.message || 'Không tải được My Product.' }, { status: 400 });
   }
 }

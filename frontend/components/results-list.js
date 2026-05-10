@@ -12,7 +12,7 @@ import {
 import { ShareModal } from './share-modal';
 import { useState } from 'react';
 
-function EmptyState({ jobState, statusText }) {
+function EmptyState({ jobState, statusText, progress }) {
   let title = 'Chưa có kết quả';
   let desc = 'Gửi job từ khung bên trái để VPS xử lý và trả về danh sách kết quả tại đây.';
   if (jobState === 'loading') {
@@ -28,11 +28,22 @@ function EmptyState({ jobState, statusText }) {
       {jobState === 'loading' ? <Loader2 className="h-8 w-8 animate-spin text-slate-500" /> : <Video className="h-8 w-8 text-slate-300" />}
       <div className="mt-4 text-xl font-semibold text-slate-900">{title}</div>
       <div className="mt-2 max-w-md text-sm leading-7 text-slate-500">{desc}</div>
+      {progress && jobState === 'loading' ? (
+        <div className="mt-5 w-full max-w-md">
+          <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
+            <span>Tiến độ {progress.label}</span>
+            <span>{progress.percent}%</span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+            <div className="h-full rounded-full bg-slate-900 transition-all duration-500" style={{ width: `${progress.percent}%` }} />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-export function ResultsList({ results, token, expiresAt, zipUrl, actionLoading, jobState, statusText, onAction }) {
+export function ResultsList({ results, token, expiresAt, zipUrl, actionLoading, jobState, statusText, progress, onAction }) {
   const [shareOpen, setShareOpen] = useState(false);
   const hasResults = results.length > 0;
 
@@ -59,6 +70,17 @@ export function ResultsList({ results, token, expiresAt, zipUrl, actionLoading, 
             </div>
             {token && <div className="mt-2 text-xs text-slate-400">Token: {token}</div>}
             {expiresAt && <div className="mt-1 text-xs text-slate-400">Hết hạn: {new Date(expiresAt).toLocaleString('vi-VN')}</div>}
+            {progress && (jobState === 'loading' || progress.percent > 0) ? (
+              <div className="mt-4 max-w-md">
+                <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
+                  <span>Tiến độ {progress.label}</span>
+                  <span>{progress.percent}%</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+                  <div className="h-full rounded-full bg-slate-900 transition-all duration-500" style={{ width: `${progress.percent}%` }} />
+                </div>
+              </div>
+            ) : null}
           </div>
           <div className="flex flex-wrap gap-3">
             <button disabled={!hasResults || actionLoading} onClick={handleSaveAll} className="btn-primary disabled:cursor-not-allowed disabled:opacity-50">
@@ -84,7 +106,7 @@ export function ResultsList({ results, token, expiresAt, zipUrl, actionLoading, 
         </div>
       </div>
       {!hasResults ? (
-        <EmptyState jobState={jobState} statusText={statusText} />
+        <EmptyState jobState={jobState} statusText={statusText} progress={progress} />
       ) : (
         <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
           {results.map((item) => (

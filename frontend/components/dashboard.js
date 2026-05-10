@@ -23,7 +23,7 @@ export function Dashboard() {
           </h1>
           <p className="mt-4 max-w-3xl text-sm leading-7 text-slate-600 md:text-base">
             Chatbot đứng đầu để tạo prompt và kịch bản. Sau đó chuyển nhanh sang text to image,
-            image to video; phần Kho video dùng để xem lại kết quả đã tạo theo từng user_id.
+            image to video; phần My Product dùng để xem lại ảnh/video đã tạo theo từng user_id.
           </p>
           <div className="mt-6">
             <Link href="/chatbot" className="btn-primary">

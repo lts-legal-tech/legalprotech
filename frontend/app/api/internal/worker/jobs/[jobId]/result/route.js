@@ -44,7 +44,7 @@ export async function POST(request, { params }) {
       if (body?.localPath) {
         const { bytes, resolved, size } = await readLocalResultFile(body.localPath);
         const originalName = body.originalName || path.basename(resolved) || 'result.mp4';
-        const { job, result } = await saveFlowResultFile({
+        const { job, result, results, savedCount } = await saveFlowResultFile({
           jobId,
           bytes,
           originalName,
@@ -56,7 +56,7 @@ export async function POST(request, { params }) {
           complete: Boolean(body.complete),
           jobSnapshot: body.jobSnapshot || null,
         });
-        return NextResponse.json({ ...job, result, uploadMode: 'local-path', uploadedBytes: size });
+        return NextResponse.json({ ...job, result, uploadedResults: results || [result].filter(Boolean), savedCount: savedCount || 1, uploadMode: 'local-path', uploadedBytes: size });
       }
 
       const job = await appendFlowResultRecords(jobId, body?.results || [], {
@@ -80,7 +80,7 @@ export async function POST(request, { params }) {
       jobSnapshot = null;
     }
 
-    const { job, result } = await saveFlowResultFile({
+    const { job, result, results, savedCount } = await saveFlowResultFile({
       jobId,
       file,
       originalName: file.name,
@@ -92,7 +92,7 @@ export async function POST(request, { params }) {
       complete: String(formData.get('complete') || 'false') === 'true',
       jobSnapshot,
     });
-    return NextResponse.json({ ...job, result, uploadMode: 'multipart' });
+    return NextResponse.json({ ...job, result, uploadedResults: results || [result].filter(Boolean), savedCount: savedCount || 1, uploadMode: 'multipart' });
   } catch (error) {
     return NextResponse.json({ success: false, error: error.message || 'Không lưu được kết quả.' }, { status: 400 });
   }

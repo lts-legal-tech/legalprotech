@@ -75,12 +75,12 @@ export const TOOL_LIST = [
   },
   {
     slug: 'my-product',
-    label: 'Kho video',
-    shortLabel: 'Kho lưu video của tôi',
+    label: 'My Product',
+    shortLabel: 'Kho lưu sản phẩm của tôi',
     inputMode: 'library',
-    outputType: 'video',
+    outputType: 'mixed',
     description:
-      'Lưu và hiển thị video đã tạo theo từng user_id. Mỗi tài khoản chỉ thấy đúng video thuộc job của chính tài khoản đó.',
+      'Lưu và hiển thị cả ảnh và video đã tạo theo từng user_id. Mỗi tài khoản chỉ thấy đúng sản phẩm thuộc job của chính tài khoản đó.',
     defaults: {
       prompt:
         'Clean studio setup, soft white light, polished commercial e-commerce aesthetic, premium ad-ready background.',

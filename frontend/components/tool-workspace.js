@@ -37,6 +37,31 @@ function clampNumber(value, min, max, fallback = min) {
   return Math.max(min, Math.min(numeric, max));
 }
 
+function progressFromJob(data, fallback = 0) {
+  const status = String(data?.status || '').toUpperCase();
+  if (status === 'COMPLETED') return 100;
+  if (['FAILED', 'CANCELLED', 'EXPIRED'].includes(status)) return clampNumber(fallback, 0, 100, 0);
+
+  const explicit = Number(data?.progressPercent ?? data?.progress ?? data?.percent);
+  if (Number.isFinite(explicit) && explicit >= 0) return clampNumber(Math.round(explicit), 0, 99, fallback);
+
+  const total = Number(data?.requestedCount || data?.requested_count || data?.count || 0);
+  const completed = Number(data?.resultCount || (Array.isArray(data?.results) ? data.results.length : 0));
+  const countPercent = total > 0 ? Math.floor((completed / total) * 100) : 0;
+  const stageBase = {
+    QUEUED: 3,
+    CLAIMED: 6,
+    OPENING_FLOW: 10,
+    CREATING_PROJECT: 18,
+    UPLOADING_ASSETS: 25,
+    SUBMITTING_PROMPT: 35,
+    GENERATING: Math.max(45, countPercent),
+    FETCHING_RESULTS: Math.max(65, countPercent),
+    PACKAGING: 92,
+  }[status] ?? fallback;
+  return clampNumber(Math.max(stageBase, countPercent), 0, 99, fallback);
+}
+
 function SegmentedOptions({ options, value, onChange, columns = 5 }) {
   const gridClass = columns === 5 ? 'grid-cols-5' : columns === 4 ? 'grid-cols-4' : columns === 3 ? 'grid-cols-3' : 'grid-cols-2';
   return (
@@ -80,6 +105,7 @@ export function ToolWorkspace({ tool }) {
   const [zipUrl, setZipUrl] = useState('');
   const [results, setResults] = useState([]);
   const [actionLoading, setActionLoading] = useState(false);
+  const [jobProgress, setJobProgress] = useState(0);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
 
   useEffect(() => {
@@ -110,6 +136,7 @@ export function ToolWorkspace({ tool }) {
     setZipUrl('');
     setResults([]);
     setActionLoading(false);
+    setJobProgress(0);
     setCopiedPrompt(false);
   }, [tool.slug]);
 
@@ -157,9 +184,12 @@ export function ToolWorkspace({ tool }) {
     let attempts = 0;
     while (attempts < 180) {
       const data = await getImageJobStatus(nextJobId);
+      setJobProgress((current) => progressFromJob(data, current));
       setStatusText(data.message || 'Đang xử lý...');
       if (data.status === 'COMPLETED') {
         setJobState('done');
+        setJobProgress(100);
+        setJobProgress(100);
         setToken(data.token || '');
         setExpiresAt(data.expiresAt || '');
         setZipUrl(data.zipUrl || '');
@@ -178,6 +208,7 @@ export function ToolWorkspace({ tool }) {
     let attempts = 0;
     while (attempts < 720) {
       const data = await getFlowJobStatus(nextJobId);
+      setJobProgress((current) => progressFromJob(data, current));
       setStatusText(data.message || 'Windows VPS Worker đang xử lý...');
       if (data.token) setToken(data.token);
       if (data.expiresAt) setExpiresAt(data.expiresAt);
@@ -185,6 +216,7 @@ export function ToolWorkspace({ tool }) {
       if (Array.isArray(data.results) && data.results.length > 0) setResults(data.results);
       if (data.status === 'COMPLETED') {
         setJobState('done');
+        setJobProgress(100);
         return;
       }
       if (['FAILED', 'CANCELLED', 'EXPIRED'].includes(data.status)) {
@@ -215,6 +247,7 @@ export function ToolWorkspace({ tool }) {
     }
 
     setJobState('loading');
+    setJobProgress(2);
     setStatusText(isFlowImage ? 'Đang gửi lệnh tạo ảnh sang Windows VPS AutoFlow Image Worker.' : isImageToVideo ? 'Đang gửi lệnh image-to-video sang Windows VPS AutoFlow Veo 3.1 Fast (lower priority).' : 'Đang gửi lệnh text-to-video lên Windows VPS AutoFlow Video Worker.');
     setError('');
     setResults([]);
@@ -259,6 +292,7 @@ export function ToolWorkspace({ tool }) {
   async function handleImageSubmit() {
     try {
       setJobState('loading');
+      setJobProgress(2);
       setStatusText('Đang đẩy request sang VPS...');
       const formData = new FormData();
       formData.append('tool', tool.slug);
@@ -287,6 +321,7 @@ export function ToolWorkspace({ tool }) {
     setExpiresAt('');
     setZipUrl('');
     setJobId('');
+    setJobProgress(0);
     if (!String(prompt || '').trim()) {
       setError('Vui lòng nhập prompt.');
       return;
@@ -493,6 +528,17 @@ export function ToolWorkspace({ tool }) {
                 {statusText || shortMessage(promptLines)}
               </div>
               {jobId && <div className="mt-2 text-xs text-slate-400">Job ID: {jobId}</div>}
+              {(jobState === 'loading' || jobState === 'done' || jobProgress > 0) && (
+                <div className="mt-4">
+                  <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
+                    <span>Tiến độ</span>
+                    <span>{Math.round(jobProgress)}%</span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+                    <div className="h-full rounded-full bg-slate-900 transition-all duration-500" style={{ width: `${Math.round(jobProgress)}%` }} />
+                  </div>
+                </div>
+              )}
             </div>
           </div>
           {error && <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
